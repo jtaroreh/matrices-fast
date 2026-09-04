@@ -1288,6 +1288,32 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 }
             }
         }
+        if n <= 400 && nnz <= 8_000 {
+            for (budget, rng_seed) in [
+                (50_000_000i64, 0x8543_4123_4A5B_6C7Du64),
+                (50_000_000, 0x1B87_3593_2C4D_5E6F),
+                (50_000_000, 0x3E91_B742_95A8_C3D1),
+                (50_000_000, 0x6A09_E667_F3BC_C908),
+            ] {
+                if let Some((cand, _)) = rgreedy::search(
+                    n,
+                    &pattern.col_ptr,
+                    &pattern.row_idx,
+                    &best_perm,
+                    best_flops,
+                    budget,
+                    rng_seed,
+                ) {
+                    if is_bijection(&cand, n) {
+                        let f = flops_of(&scoring_pat, &cand);
+                        if f < best_flops {
+                            best_flops = f;
+                            best_perm = cand;
+                        }
+                    }
+                }
+            }
+        }
     } else if medium_exact_gate {
 
         // The same serial exact search above its original size gate. Two fixed
