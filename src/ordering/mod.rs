@@ -1344,6 +1344,32 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 }
             }
         }
+        if n <= 200 && nnz <= 3_000 {
+            for (budget, rng_seed) in [
+                (50_000_000i64, 0x7E15_A4B2_C3D4_E5F6u64),
+                (50_000_000, 0xF9E8_D7C6_B5A4_3210),
+                (50_000_000, 0x4A6B_8C0D_2E4F_6A8B),
+                (50_000_000, 0x1357_9BDF_0246_8ACE),
+            ] {
+                if let Some((cand, _)) = rgreedy::search(
+                    n,
+                    &pattern.col_ptr,
+                    &pattern.row_idx,
+                    &best_perm,
+                    best_flops,
+                    budget,
+                    rng_seed,
+                ) {
+                    if is_bijection(&cand, n) {
+                        let f = flops_of(&scoring_pat, &cand);
+                        if f < best_flops {
+                            best_flops = f;
+                            best_perm = cand;
+                        }
+                    }
+                }
+            }
+        }
     } else if medium_exact_gate {
 
         // The same serial exact search above its original size gate. Two fixed
@@ -1498,11 +1524,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                         cfg3.max_blocks = 32;
                         cfg3.min_s = 16;
                         cfg3.max_s = 512;
-                        cfg3.budget = if (1_000..3_000).contains(&n) && nnz <= 40_000 {
-                            16_000_000
-                        } else {
-                            8_000_000
-                        };
+                        cfg3.budget = 8_000_000;
                         let improved3 = rgreedy::subtree_refine(
                             n,
                             &pattern.col_ptr,
