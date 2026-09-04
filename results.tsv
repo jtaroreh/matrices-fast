@@ -6,3 +6,14 @@
 # The log starts empty: your first run appends the first row. For the score the
 # shipped src/ordering/ reaches on the dev corpus, see
 # src/ordering/memory/index.md.
+1788535286	OK	0.760368	0.877507	test slice 10
+1788535716	OK	0.760368	0.877507	swarm slice 0..10
+1788535850	OK	0.760368	0.877507	swarm slice 0..10
+1788535962	OK	0.760368	0.877507	swarm slice 0..10
+1788536237	OK	0.760368	0.877507	swarm slice 0..10
+1788536368	OK	0.760368	0.877507	swarm slice 0..10
+1788536584	OK	0.760368	0.877507	swarm slice 0..10
+1788536599	OK	0.887343	0.959700	swarm slice 100..110
+1788536621	OK	0.760368	0.877507	swarm slice 0..10
+1788536641	OK	0.760368	0.877507	swarm slice 0..10
+1788536649	OK	0.760368	0.877507	swarm slice 0..10
