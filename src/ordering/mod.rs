@@ -548,10 +548,6 @@ fn relabel_restarts_tuned(budget: usize, cap: usize, n: usize, nnz: usize, max_d
 
     if max_deg * 50 > n && (100_000..=150_000).contains(&nnz) {
         base_r.min(4) // Hub guard (e.g. ringpack_30_2)
-    } else if n <= 1_000 && nnz <= 4_000 {
-        (1_200_000 / nnz).min(96) // Low-nnz tiny regime
-    } else if n <= 1_000 && nnz <= 5_000 {
-        (800_000 / nnz).min(64) // Low-nnz small regime
     } else if nnz <= 20_000 {
         (600_000 / nnz).min(48) // Low-nnz regime
     } else if nnz <= 150_000 && max_deg * 50 <= n {
