@@ -519,14 +519,18 @@ fn perturb(base: &[usize], swaps: usize, seed: u64) -> Vec<usize> {
 /// Bucket-weighted budget allocation: scale restart budget and cap by dimension `n`,
 /// investing more work in high-leverage buckets (gt_10k has weight 0.40 over only 45 matrices,
 /// while lt_1k has weight 0.30 over 147 matrices).
+///
+/// Reallocates relabel budget from lt_1k to 1k_10k and gt_10k proportional to benchmark
+/// bucket weights (0.30 : 0.30 : 0.40):
+/// 210,000 µs is reallocated from lt_1k (90,000 to 1k_10k and 120,000 to gt_10k, leaving 90,000 for lt_1k).
 #[inline]
 fn relabel_budget_and_cap(n: usize) -> (usize, usize) {
     if n >= 10_000 {
-        (500_000, 36)
+        (620_000, 36)
     } else if n >= 1_000 {
-        (400_000, 30)
+        (490_000, 30)
     } else {
-        (300_000, 24)
+        (90_000, 24)
     }
 }
 
@@ -1260,8 +1264,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -3463,5 +3467,22 @@ mod tests {
 
             assert!(requested_budget <= TERMINAL_SUBTREE_SEARCH_WORK_LIMIT);
         }
+    }
+
+    #[test]
+    fn test_relabel_budget_and_cap_reallocation() {
+        // gt_10k bucket: n >= 10_000
+        assert_eq!(relabel_budget_and_cap(10_000), (620_000, 36));
+        assert_eq!(relabel_budget_and_cap(50_000), (620_000, 36));
+
+        // 1k_10k bucket: 1_000 <= n < 10_000
+        assert_eq!(relabel_budget_and_cap(1_000), (490_000, 30));
+        assert_eq!(relabel_budget_and_cap(5_000), (490_000, 30));
+        assert_eq!(relabel_budget_and_cap(9_999), (490_000, 30));
+
+        // lt_1k bucket: n < 1_000
+        assert_eq!(relabel_budget_and_cap(999), (90_000, 24));
+        assert_eq!(relabel_budget_and_cap(100), (90_000, 24));
+        assert_eq!(relabel_budget_and_cap(0), (90_000, 24));
     }
 }
