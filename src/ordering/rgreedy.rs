@@ -818,8 +818,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add(best / par.accept_den * par.accept_num);
+        let bound = (if thresh > cur_f[wi] { thresh } else { cur_f[wi] }).saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -1073,7 +1073,8 @@ pub(crate) fn adjacent_pair_descent(
             let a = cur[k];
             let b = cur[k + 1];
             let adjacent = game.adj[a * game.w + (b >> 6)] & (1u64 << (b & 63)) != 0;
-            let swap = adjacent && game.deg[b] < game.deg[a];
+            let original_edge = game.adj0[a * game.w + (b >> 6)] & (1u64 << (b & 63)) != 0;
+            let swap = adjacent && original_edge && game.deg[b] < game.deg[a];
             let (first, second) = if swap { (b, a) } else { (a, b) };
             changed |= swap;
             next.push(first);
@@ -2578,6 +2579,68 @@ mod subtree_preparation_tests {
                         );
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod pair_tests {
+    use super::super::{flops_of, is_bijection, Pattern, ScoringPattern};
+    use super::*;
+
+    #[test]
+    fn pair_descent_restricts_candidate_swaps_to_original_pattern_edges() {
+        // Construct a graph with vertices 0, 1, 2, 3:
+        // Edges: (0, 1), (0, 2), (1, 3).
+        // Vertices 1 and 2 do NOT share an edge in the original pattern.
+        // Seed order: [0, 1, 2, 3].
+        // In sweep 1 (odd sweep), 0 is eliminated first as a singleton.
+        // Eliminating 0 adds fill edge (1, 2).
+        // Then at k=1, pair is (1, 2).
+        // In the fill graph, deg(1) = 2 (edges to 2, 3) and deg(2) = 1 (edge to 1).
+        // deg(2) < deg(1). If candidate swaps were allowed on fill edges, (1, 2) would swap.
+        // Because candidate swaps are restricted to original pattern edges, (1, 2) must NOT swap.
+        let edges = [(0, 1), (0, 2), (1, 3)];
+        let pat = Pattern::from_edges(4, &edges);
+        let seed = vec![0, 1, 2, 3];
+        let res = adjacent_pair_descent(4, &pat.col_ptr, &pat.row_idx, &seed, 2, 100_000);
+        assert_eq!(res, None, "Vertex pair (1, 2) only shares a fill edge and must not be swapped");
+
+        // Now add the original edge (1, 2).
+        let edges_with_edge = [(0, 1), (0, 2), (1, 3), (1, 2)];
+        let pat_with_edge = Pattern::from_edges(4, &edges_with_edge);
+        let res_with_edge = adjacent_pair_descent(4, &pat_with_edge.col_ptr, &pat_with_edge.row_idx, &seed, 2, 100_000);
+        assert_eq!(res_with_edge, Some(vec![0, 2, 1, 3]), "With original edge (1, 2), candidate swap must take place");
+    }
+
+    #[test]
+    fn pair_descent_is_monotone_and_valid() {
+        let mut rng = 0x51A3_B2C4_D5E6_F708;
+        for n in [6, 15, 65] {
+            let mut edges = Vec::new();
+            for u in 0..n {
+                for v in u + 1..n {
+                    if xs64(&mut rng) % 10 < 3 {
+                        edges.push((u, v));
+                    }
+                }
+            }
+            let pat = Pattern::from_edges(n, &edges);
+            let mut seed: Vec<_> = (0..n).collect();
+            for i in 1..n {
+                seed.swap(i, xs64(&mut rng) as usize % (i + 1));
+            }
+            let sp = ScoringPattern {
+                n: pat.n,
+                col_ptr: pat.col_ptr.clone(),
+                row_idx: pat.row_idx.clone(),
+            };
+            let before = flops_of(&sp, &seed);
+            if let Some(improved) = adjacent_pair_descent(n, &pat.col_ptr, &pat.row_idx, &seed, 4, 500_000) {
+                assert!(is_bijection(&improved, n));
+                let after = flops_of(&sp, &improved);
+                assert!(after <= before, "Pair descent must not increase flops: before={before}, after={after}");
             }
         }
     }
