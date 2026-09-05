@@ -6,3 +6,5 @@
 # The log starts empty: your first run appends the first row. For the score the
 # shipped src/ordering/ reaches on the dev corpus, see
 # src/ordering/memory/index.md.
+1788600755	OK	0.914271	0.970864	smoke test
+1788601478	OK	0.874557	0.958488	verification for max_deg > 500 scaling

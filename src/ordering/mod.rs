@@ -1255,11 +1255,14 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         && nnz > 0
         && nnz <= PAIR_DESCENT_MAX_NNZ
         && (n <= PAIR_DESCENT_MAX_N || pair_descent_ext);
-    let pair_descent_ops_budget = if pair_descent_ext && n > PAIR_DESCENT_MAX_N {
+    let mut pair_descent_ops_budget = if pair_descent_ext && n > PAIR_DESCENT_MAX_N {
         PAIR_DESCENT_EXT_OPS_BUDGET
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
+    if max_deg > 500 {
+        pair_descent_ops_budget = pair_descent_ops_budget.min(32_000_000);
+    }
     let mut well_below;
     let mut medium_exact_gate;
 
@@ -3463,5 +3466,20 @@ mod tests {
 
             assert!(requested_budget <= TERMINAL_SUBTREE_SEARCH_WORK_LIMIT);
         }
+    }
+
+    #[test]
+    fn order_handles_high_degree_graph() {
+        let n = 600;
+        let mut edges = Vec::new();
+        for v in 1..=510 {
+            edges.push((0, v));
+        }
+        for v in 1..510 {
+            edges.push((v, v + 1));
+        }
+        let pat = Pattern::from_edges(n, &edges);
+        let perm = order(&pat);
+        assert_bijection(&perm, n);
     }
 }
