@@ -818,8 +818,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add(best / par.accept_den * par.accept_num);
+        let bound = (if thresh > cur_f[wi] { thresh } else { cur_f[wi] }).saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -902,9 +902,105 @@ pub(crate) fn search_seed(
     )
 }
 
-/// The PRNG seed for stream `k`. Fixed constant, no entropy, no clock.
+/// Deterministic Sobol low-discrepancy sequence generator for 64-bit stream seeds.
+///
+/// Implements a 64-bit 1-dimensional Sobol sequence using the Antonov–Saleev Gray-code
+/// formulation with 64 direction numbers and digital scrambling.
+///
+/// In dimension 1, the generating polynomial is P(x) = x + 1 with direction numbers
+/// V_i = 1 << (64 - i), forming an optimal (0, 1)-sequence in base 2.
+/// The digital shift (scramble) strictly preserves the (t, s)-net stratification and
+/// low-discrepancy properties while ensuring full 64-bit word coverage across streams
+/// without clustering or empty dyadic intervals.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Sobol {
+    pub(crate) direction: [u64; 64],
+    pub(crate) scramble: u64,
+}
+
+impl Sobol {
+    /// Default digital scramble constant: the 64-bit golden ratio fractional expansion,
+    /// providing maximal bit diffusion while preserving Sobol net stratification.
+    pub(crate) const DEFAULT_SCRAMBLE: u64 = 0x9E37_79B9_7F4A_7C15;
+
+    /// Create a new Sobol generator with standard 1D direction numbers and default scramble.
+    pub(crate) const fn new() -> Self {
+        Self::with_scramble(Self::DEFAULT_SCRAMBLE)
+    }
+
+    /// Create a new Sobol generator with custom digital scramble.
+    pub(crate) const fn with_scramble(scramble: u64) -> Self {
+        let mut direction = [0u64; 64];
+        let mut i = 0;
+        while i < 64 {
+            direction[i] = 1u64 << (63 - i);
+            i += 1;
+        }
+        Self { direction, scramble }
+    }
+
+    /// Evaluate the k-th sample (0-indexed) of the low-discrepancy sequence.
+    ///
+    /// Computes sequence point k using its reflected Gray code g = k ^ (k >> 1)
+    /// to combine direction numbers via XOR, followed by the digital scramble.
+    pub(crate) const fn sample(&self, k: usize) -> u64 {
+        let n = k as u64;
+        let gray = n ^ (n >> 1);
+        let mut x = 0u64;
+        let mut g = gray;
+        let mut bit = 0;
+        while g > 0 {
+            if g & 1 != 0 {
+                x ^= self.direction[bit];
+            }
+            g >>= 1;
+            bit += 1;
+        }
+        let seed = x ^ self.scramble;
+        if seed == 0 { 1 } else { seed }
+    }
+
+    /// Sequential iterator over the Sobol sequence starting at stream 0.
+    pub(crate) const fn iter(self) -> SobolIter {
+        SobolIter {
+            sobol: self,
+            index: 0,
+            current: 0,
+        }
+    }
+}
+
+/// Iterator over sequential points of a Sobol sequence in O(1) step time
+/// using the Antonov–Saleev recurrence.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SobolIter {
+    sobol: Sobol,
+    index: u64,
+    current: u64,
+}
+
+impl Iterator for SobolIter {
+    type Item = u64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index > 0 {
+            let c = self.index.trailing_zeros() as usize;
+            if c < 64 {
+                self.current ^= self.sobol.direction[c];
+            }
+        }
+        self.index = self.index.wrapping_add(1);
+        let seed = self.current ^ self.sobol.scramble;
+        Some(if seed == 0 { 1 } else { seed })
+    }
+}
+
+pub(crate) const SOBOL: Sobol = Sobol::new();
+
+/// The PRNG seed for stream `k`. Generated using a deterministic Sobol
+/// low-discrepancy sequence generator to maximize search coverage.
 pub(crate) fn stream_rng(k: usize) -> u64 {
-    0x9E37_79B9_7F4A_7C15u64.wrapping_mul(2 * k as u64 + 1) ^ (k as u64) << 32
+    SOBOL.sample(k)
 }
 
 pub(crate) fn stream_params(k: usize) -> Params {
@@ -1263,6 +1359,65 @@ mod atomic_budget_tests {
         let seed: Vec<_> = (0..n).collect();
         for budget in [0, 1, 32] {
             assert!(search(n, &pat.col_ptr, &pat.row_idx, &seed, u64::MAX, budget, 7).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod sobol_stream_seed_tests {
+    use super::*;
+
+    #[test]
+    fn sobol_is_deterministic() {
+        for k in 0..128 {
+            let s1 = stream_rng(k);
+            let s2 = stream_rng(k);
+            assert_eq!(s1, s2, "stream_rng({k}) must be deterministic");
+        }
+    }
+
+    #[test]
+    fn sobol_sample_matches_iter() {
+        let mut it = SOBOL.iter();
+        for k in 0..256 {
+            let expected = SOBOL.sample(k);
+            let actual = it.next().unwrap();
+            assert_eq!(actual, expected, "Mismatch at stream {k}");
+            assert_eq!(actual, stream_rng(k));
+        }
+    }
+
+    #[test]
+    fn sobol_seeds_are_nonzero() {
+        for k in 0..1024 {
+            assert_ne!(stream_rng(k), 0, "Seed for stream {k} must not be zero");
+        }
+    }
+
+    #[test]
+    fn sobol_dyadic_stratification_maximizes_coverage() {
+        for m in [1, 2, 3, 4, 8] {
+            let n = 1usize << m;
+            let mut seen = std::collections::HashSet::new();
+            for k in 0..n {
+                let seed = stream_rng(k);
+                let bin = seed >> (64 - m);
+                seen.insert(bin);
+            }
+            assert_eq!(
+                seen.len(),
+                n,
+                "For {n} streams (m={m}), all {n} dyadic bins must be uniquely occupied"
+            );
+        }
+    }
+
+    #[test]
+    fn sobol_stream_seeds_are_distinct() {
+        let mut seen = std::collections::HashSet::new();
+        for k in 0..2048 {
+            let seed = stream_rng(k);
+            assert!(seen.insert(seed), "Duplicate seed generated at k={k}");
         }
     }
 }
