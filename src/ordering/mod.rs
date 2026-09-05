@@ -1132,7 +1132,11 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // a ratio, never raise it — and TIME is the only thing at stake. See
     // `RELABEL_AMF_MAX_NNZ` for how that is bounded.
     if nnz <= RELABEL_AMF_MAX_NNZ {
-        let amf_alphas = [5.0f64, 2.0, -1.0, 1.0, 16.0];
+        let amf_alphas: &[f64] = if n >= 10_000 && nnz <= 150_000 {
+            &[5.0, 2.0, -1.0, 1.0, 10.0, 16.0]
+        } else {
+            &[5.0, 2.0, -1.0, 1.0, 16.0]
+        };
         let num_passes: usize = if nnz <= 80_000 { 2 } else { 1 };
         for pass in 0..num_passes {
             let seed_offset = pass as u64 * 1000;
