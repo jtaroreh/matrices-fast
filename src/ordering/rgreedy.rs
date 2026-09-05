@@ -1399,6 +1399,139 @@ pub(crate) fn adjacent_triple_descent(
     changed.then_some(cur)
 }
 
+/// Exact circular 3-permutation descent with stride 2.
+///
+/// Sweeps evaluate sliding windows of 3 live vertices with stride 2, testing
+/// cyclic permutations (circular 3-permutations: [1, 2, 0] and [2, 0, 1])
+/// against the incumbent [0, 1, 2] using exact triple costs.
+/// This breaks 2-hop transposition deadlocks where adjacent pairwise swaps
+/// cannot improve because intermediate transpositions increase cost or are
+/// non-adjacent.
+///
+/// Alternating sweep offset (0, 1) covers all 2-hop boundaries across sweeps.
+/// All work is precharged against `budget` via `TripleWork`. Completed
+/// improving circular permutations are retained on budget exhaustion.
+pub(crate) fn circular_3permutation_descent(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    seed: &[usize],
+    sweeps: usize,
+    budget: i64,
+) -> Option<Vec<usize>> {
+    if n < 3 || n > MAX_N || budget <= 0 || sweeps == 0 || seed.len() != n || col_ptr.len() != n + 1
+    {
+        return None;
+    }
+    let mut work = TripleWork { remaining: budget };
+    let validation = (n + 1).saturating_add(row_idx.len()).saturating_add(2 * n);
+    if !work.charge(validation)
+        || col_ptr.first().copied() != Some(0)
+        || col_ptr.last().copied() != Some(row_idx.len())
+        || col_ptr
+            .windows(2)
+            .any(|p| p[0] > p[1] || p[1] > row_idx.len())
+        || row_idx.iter().any(|&v| v >= n)
+    {
+        return None;
+    }
+    let mut seen = vec![false; n];
+    for &v in seed {
+        if v >= n || seen[v] {
+            return None;
+        }
+        seen[v] = true;
+    }
+    let w = n.div_ceil(64);
+    let build = n
+        .saturating_mul(w)
+        .saturating_add(2usize.saturating_mul(row_idx.len()))
+        .saturating_add(n);
+    if !work.charge(build) {
+        return None;
+    }
+    let adj0 = Game::build_adj(n, col_ptr, row_idx)?;
+    let setup = 2usize
+        .saturating_mul(n)
+        .saturating_mul(w)
+        .saturating_add(13usize.saturating_mul(n))
+        .saturating_add(w);
+    if !work.charge(setup) {
+        return None;
+    }
+    let mut game = Game::new(n, &adj0)?;
+    let mut cur = seed.to_vec();
+    let mut changed = false;
+    let reset = 2usize
+        .saturating_mul(n)
+        .saturating_mul(w)
+        .saturating_add(8usize.saturating_mul(n));
+    let evaluation = 20usize.saturating_mul(w).saturating_add(192);
+
+    for sweep in 0..sweeps {
+        if !work.charge(reset) {
+            return changed.then_some(cur);
+        }
+        game.reset();
+        let offset = sweep % 2;
+        for &v in cur.iter().take(offset) {
+            if !work.eliminate(&mut game, v) {
+                return changed.then_some(cur);
+            }
+        }
+        let mut k = offset;
+        while k + 2 < n {
+            if !work.charge(evaluation) {
+                return changed.then_some(cur);
+            }
+            let triple = [cur[k], cur[k + 1], cur[k + 2]];
+            let costs = triple_costs(&game, triple);
+            let mut best = 0;
+            for &choice in &[3, 4] {
+                if costs[choice] < costs[best] {
+                    best = choice;
+                }
+            }
+            if best != 0 {
+                let chosen = TRIPLE_ORDERS[best].map(|i| triple[i]);
+                cur[k..k + 3].copy_from_slice(&chosen);
+                changed = true;
+            }
+            k += 2;
+            if k + 2 < n {
+                for &v in &cur[k - 2..k] {
+                    if !work.eliminate(&mut game, v) {
+                        return changed.then_some(cur);
+                    }
+                }
+            }
+        }
+    }
+    changed.then_some(cur)
+}
+
+pub(crate) fn circular_triple_descent(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    seed: &[usize],
+    sweeps: usize,
+    budget: i64,
+) -> Option<Vec<usize>> {
+    circular_3permutation_descent(n, col_ptr, row_idx, seed, sweeps, budget)
+}
+
+pub(crate) fn circular_3_permutation_descent(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    seed: &[usize],
+    sweeps: usize,
+    budget: i64,
+) -> Option<Vec<usize>> {
+    circular_3permutation_descent(n, col_ptr, row_idx, seed, sweeps, budget)
+}
+
 /// Exact widths after any subset of a fixed four-pivot window is eliminated.
 /// For the pivot's connected component C in H[S + pivot], a nonsingleton C
 /// has width |union N_H(C)| - |C| + 1. Every vertex of C is in that union,
@@ -2743,6 +2876,143 @@ mod triple_tests {
         }
         assert!(improvements > 0);
         println!("TRIPLE_CANONICAL improving_cases={improvements}");
+    }
+}
+
+#[cfg(test)]
+mod circular_triple_tests {
+    use super::super::{flops_of, is_bijection, Pattern, ScoringPattern};
+    use super::*;
+
+    fn canonical(pat: &Pattern, order: &[usize]) -> u64 {
+        let sp = ScoringPattern {
+            n: pat.n,
+            col_ptr: pat.col_ptr.clone(),
+            row_idx: pat.row_idx.clone(),
+        };
+        flops_of(&sp, order)
+    }
+
+    #[test]
+    fn circular_3permutation_descent_breaks_2hop_transposition_deadlock() {
+        // Construct a graph where adjacent pairs are deadlocked:
+        // vertices 0, 1, 2 in order [0, 1, 2].
+        // (0, 2) is an edge, but neither (0, 1) nor (1, 2) is an edge.
+        // Vertex 2 has small degree (1), vertex 0 has degree 5, vertex 1 has degree 8.
+        // adjacent_pair_descent cannot swap (0, 1) or (1, 2) because they are not adjacent.
+        let mut edges = vec![(0, 2)];
+        for v in 3..8 {
+            edges.push((0, v));
+        }
+        for v in 3..11 {
+            edges.push((1, v));
+        }
+        let n = 11;
+        let pat = Pattern::from_edges(n, &edges);
+        let seed: Vec<usize> = (0..n).collect();
+        let before = canonical(&pat, &seed);
+
+        // Verify that adjacent_pair_descent is completely stuck/deadlocked.
+        let pair_cand = adjacent_pair_descent(n, &pat.col_ptr, &pat.row_idx, &seed, 4, 1_000_000);
+        assert!(
+            pair_cand.is_none(),
+            "adjacent_pair_descent must be deadlocked on 2-hop transposition"
+        );
+
+        // Verify that circular 3-permutation descent with stride 2 breaks the deadlock!
+        let circ_cand = circular_3permutation_descent(n, &pat.col_ptr, &pat.row_idx, &seed, 2, 1_000_000);
+        assert!(circ_cand.is_some(), "circular_3permutation_descent must break the deadlock");
+        let got = circ_cand.unwrap();
+        assert!(is_bijection(&got, n));
+        assert!(canonical(&pat, &got) < before);
+        // Specifically, vertices were rotated via circular 3-permutation [1, 2, 0]
+        assert_eq!(&got[0..3], &[1, 2, 0]);
+    }
+
+    #[test]
+    fn circular_triple_descent_is_canonically_monotone_and_deterministic() {
+        let mut rng = 0xEC1B_7492_D805_36AF;
+        let mut improvements = 0;
+        for n in [13, 67, 181, 1603] {
+            let mut edges = Vec::new();
+            for v in 0..n {
+                edges.push((v, (v + 1) % n));
+                for _ in 0..3 {
+                    let u = xs64(&mut rng) as usize % n;
+                    if u != v {
+                        edges.push((v, u));
+                    }
+                }
+            }
+            let pat = Pattern::from_edges(n, &edges);
+            let mut seed: Vec<_> = (0..n).collect();
+            for i in 1..n {
+                seed.swap(i, xs64(&mut rng) as usize % (i + 1));
+            }
+            let before = canonical(&pat, &seed);
+            for sweeps in [2, 3] {
+                for budget in [0, 1, 32, 256, 2048, 10_000, 50_000, 200_000, 2_000_000] {
+                    let first = circular_3permutation_descent(
+                        n,
+                        &pat.col_ptr,
+                        &pat.row_idx,
+                        &seed,
+                        sweeps,
+                        budget,
+                    );
+                    let second = circular_triple_descent(
+                        n,
+                        &pat.col_ptr,
+                        &pat.row_idx,
+                        &seed,
+                        sweeps,
+                        budget,
+                    );
+                    assert_eq!(first, second, "n={n} budget={budget} sweeps={sweeps}");
+                    if let Some(got) = first {
+                        assert!(is_bijection(&got, n));
+                        assert!(
+                            canonical(&pat, &got) < before,
+                            "n={n} budget={budget} sweeps={sweeps}"
+                        );
+                        improvements += 1;
+                    }
+                }
+            }
+        }
+        assert!(improvements > 0);
+        println!("CIRCULAR_TRIPLE_CANONICAL improving_cases={improvements}");
+    }
+
+    #[test]
+    fn circular_triple_descent_preserves_completed_changes_on_budget_exhaustion() {
+        let mut edges = vec![(0, 2)];
+        for v in 3..8 {
+            edges.push((0, v));
+        }
+        for v in 3..11 {
+            edges.push((1, v));
+        }
+        let n = 11;
+        let pat = Pattern::from_edges(n, &edges);
+        let seed: Vec<usize> = (0..n).collect();
+        // Budget 800 fits validation, build, setup, reset, and first evaluation,
+        // but exhausts before completing all sweeps or subsequent triples.
+        let got = circular_3permutation_descent(n, &pat.col_ptr, &pat.row_idx, &seed, 2, 800)
+            .expect("first improving circular triple fits even though budget exhausts");
+        assert_eq!(&got[..3], &[1, 2, 0]);
+        assert_eq!(&got[3..], &seed[3..]);
+        assert!(is_bijection(&got, n));
+        assert!(canonical(&pat, &got) < canonical(&pat, &seed));
+    }
+
+    #[test]
+    fn circular_triple_descent_rejects_invalid_inputs() {
+        assert!(circular_3permutation_descent(2, &[0, 0, 0], &[], &[0, 1], 1, 1000).is_none());
+        assert!(circular_3permutation_descent(3, &[0, 0, 0, 0], &[], &[0, 1, 2], 0, 1000).is_none());
+        assert!(circular_3permutation_descent(3, &[0, 0, 0, 0], &[], &[0, 1, 2], 1, 0).is_none());
+        assert!(circular_3permutation_descent(3, &[0, 0, 0, 0], &[], &[0, 1], 1, 1000).is_none());
+        assert!(circular_3permutation_descent(3, &[0, 0, 0], &[], &[0, 1, 2], 1, 1000).is_none());
     }
 }
 
