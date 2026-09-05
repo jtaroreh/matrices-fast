@@ -1260,8 +1260,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -1441,22 +1441,12 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // stay inside the measured corpus envelope rather than running on
     // unbounded hidden inputs.
     if (SUBTREE_MIN_N..=SUBTREE_MAX_N).contains(&n) && nnz <= 1_500_000 {
-        let permuted = permute_pattern(&scoring_pat, &best_perm);
-        let etree = EliminationTree::from_pattern(&permuted);
-        let post = etree.postorder();
-        let mut candidate: Vec<usize> = post.iter().map(|&j| best_perm[j]).collect();
-
-        let post_pattern = permute_pattern(&scoring_pat, &candidate);
-        let post_etree = EliminationTree::from_pattern(&post_pattern);
-        let counts: Vec<u32> = column_counts_gnp(&post_pattern, &post_etree)
-            .into_iter()
-            .map(|c| c as u32)
-            .collect();
-        let parent: Vec<i32> = post_etree
-            .parent
-            .iter()
-            .map(|p| p.map_or(-1, |j| j as i32))
-            .collect();
+        let (mut candidate, counts, parent, cand_flops) =
+            prepare_candidate_and_etree(&scoring_pat, &best_perm, best_flops);
+        if cand_flops < best_flops {
+            best_flops = cand_flops;
+            best_perm = candidate.clone();
+        }
         let mut cfg1 = subtree_cfg_for(n, nnz);
         let mut improved = rgreedy::subtree_refine(
             n,
@@ -1506,22 +1496,12 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 // Round 2: Refine the newly improved incumbent's elimination tree.
                 // Uses round = 1 to activate diversified search seeds across blocks.
                 // Bounded at 24 blocks and 1M ops per block, strictly monotonic.
-                let permuted2 = permute_pattern(&scoring_pat, &best_perm);
-                let etree2 = EliminationTree::from_pattern(&permuted2);
-                let post2 = etree2.postorder();
-                let mut candidate2: Vec<usize> = post2.iter().map(|&j| best_perm[j]).collect();
-
-                let post_pattern2 = permute_pattern(&scoring_pat, &candidate2);
-                let post_etree2 = EliminationTree::from_pattern(&post_pattern2);
-                let counts2: Vec<u32> = column_counts_gnp(&post_pattern2, &post_etree2)
-                    .into_iter()
-                    .map(|c| c as u32)
-                    .collect();
-                let parent2: Vec<i32> = post_etree2
-                    .parent
-                    .iter()
-                    .map(|p| p.map_or(-1, |j| j as i32))
-                    .collect();
+                let (mut candidate2, counts2, parent2, cand_flops2) =
+                    prepare_candidate_and_etree(&scoring_pat, &best_perm, best_flops);
+                if cand_flops2 < best_flops {
+                    best_flops = cand_flops2;
+                    best_perm = candidate2.clone();
+                }
                 let mut cfg2 = subtree_cfg_for(n, nnz);
                 cfg2.round = 1;
                 cfg2.max_blocks = 32;
@@ -1559,23 +1539,12 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                         // Same 1M ops per block, so the whole phase stays a
                         // deterministic bounded-work chain; strictly
                         // monotonic (accepted only on fewer flops).
-                        let permuted3 = permute_pattern(&scoring_pat, &best_perm);
-                        let etree3 = EliminationTree::from_pattern(&permuted3);
-                        let post3 = etree3.postorder();
-                        let mut candidate3: Vec<usize> =
-                            post3.iter().map(|&j| best_perm[j]).collect();
-
-                        let post_pattern3 = permute_pattern(&scoring_pat, &candidate3);
-                        let post_etree3 = EliminationTree::from_pattern(&post_pattern3);
-                        let counts3: Vec<u32> = column_counts_gnp(&post_pattern3, &post_etree3)
-                            .into_iter()
-                            .map(|c| c as u32)
-                            .collect();
-                        let parent3: Vec<i32> = post_etree3
-                            .parent
-                            .iter()
-                            .map(|p| p.map_or(-1, |j| j as i32))
-                            .collect();
+                        let (mut candidate3, counts3, parent3, cand_flops3) =
+                            prepare_candidate_and_etree(&scoring_pat, &best_perm, best_flops);
+                        if cand_flops3 < best_flops {
+                            best_flops = cand_flops3;
+                            best_perm = candidate3.clone();
+                        }
                         let mut cfg3 = subtree_cfg_for(n, nnz);
                         cfg3.round = 1;
                         cfg3.max_blocks = 32;
@@ -1605,24 +1574,12 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                 // 64M per block only in the measured-safe
                                 // lower-medium band; retain the hidden-proven
                                 // 32M budget everywhere else.
-                                let permuted4 = permute_pattern(&scoring_pat, &best_perm);
-                                let etree4 = EliminationTree::from_pattern(&permuted4);
-                                let post4 = etree4.postorder();
-                                let mut candidate4: Vec<usize> =
-                                    post4.iter().map(|&j| best_perm[j]).collect();
-
-                                let post_pattern4 = permute_pattern(&scoring_pat, &candidate4);
-                                let post_etree4 = EliminationTree::from_pattern(&post_pattern4);
-                                let counts4: Vec<u32> =
-                                    column_counts_gnp(&post_pattern4, &post_etree4)
-                                        .into_iter()
-                                        .map(|c| c as u32)
-                                        .collect();
-                                let parent4: Vec<i32> = post_etree4
-                                    .parent
-                                    .iter()
-                                    .map(|p| p.map_or(-1, |j| j as i32))
-                                    .collect();
+                                let (mut candidate4, counts4, parent4, cand_flops4) =
+                                    prepare_candidate_and_etree(&scoring_pat, &best_perm, best_flops);
+                                if cand_flops4 < best_flops {
+                                    best_flops = cand_flops4;
+                                    best_perm = candidate4.clone();
+                                }
                                 let mut cfg4 = subtree_cfg_for(n, nnz);
                                 cfg4.round = 3;
                                 cfg4.max_blocks = 32;
@@ -1651,24 +1608,12 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                         // Round 5: one more pass over the round-4
                                         // incumbent. Same block count (32), min_s 16,
                                         // max_s 768, round = 4 seed diversification.
-                                        let permuted5 = permute_pattern(&scoring_pat, &best_perm);
-                                        let etree5 = EliminationTree::from_pattern(&permuted5);
-                                        let post5 = etree5.postorder();
-                                        let mut candidate5: Vec<usize> =
-                                            post5.iter().map(|&j| best_perm[j]).collect();
-
-                                        let post_pattern5 = permute_pattern(&scoring_pat, &candidate5);
-                                        let post_etree5 = EliminationTree::from_pattern(&post_pattern5);
-                                        let counts5: Vec<u32> =
-                                            column_counts_gnp(&post_pattern5, &post_etree5)
-                                                .into_iter()
-                                                .map(|c| c as u32)
-                                                .collect();
-                                        let parent5: Vec<i32> = post_etree5
-                                            .parent
-                                            .iter()
-                                            .map(|p| p.map_or(-1, |j| j as i32))
-                                            .collect();
+                                        let (mut candidate5, counts5, parent5, cand_flops5) =
+                                            prepare_candidate_and_etree(&scoring_pat, &best_perm, best_flops);
+                                        if cand_flops5 < best_flops {
+                                            best_flops = cand_flops5;
+                                            best_perm = candidate5.clone();
+                                        }
                                         let mut cfg5 = subtree_cfg_for(n, nnz);
                                         cfg5.round = 4;
                                         if n < 100_000 || best_flops != amd_flops {
@@ -1712,23 +1657,13 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // second used this narrow gate. Substitution makes total work lower than
     // the promoted frontier while retaining the stronger search allocation.
     if (SUBTREE_MIN_N..=80_000).contains(&n) && nnz <= 250_000 {
-        let incumbent_flops = flops_of(&scoring_pat, &best_perm);
-        let permuted = permute_pattern(&scoring_pat, &best_perm);
-        let etree = EliminationTree::from_pattern(&permuted);
-        let post = etree.postorder();
-        let mut candidate: Vec<usize> = post.iter().map(|&j| best_perm[j]).collect();
-
-        let post_pattern = permute_pattern(&scoring_pat, &candidate);
-        let post_etree = EliminationTree::from_pattern(&post_pattern);
-        let counts: Vec<u32> = column_counts_gnp(&post_pattern, &post_etree)
-            .into_iter()
-            .map(|c| c as u32)
-            .collect();
-        let parent: Vec<i32> = post_etree
-            .parent
-            .iter()
-            .map(|p| p.map_or(-1, |j| j as i32))
-            .collect();
+        let incumbent_flops = best_flops;
+        let (mut candidate, counts, parent, cand_flops) =
+            prepare_candidate_and_etree(&scoring_pat, &best_perm, best_flops);
+        if cand_flops < best_flops {
+            best_flops = cand_flops;
+            best_perm = candidate.clone();
+        }
         let improved = rgreedy::subtree_refine(
             n,
             &pattern.col_ptr,
@@ -1751,21 +1686,12 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                     || (n >= 10_000 && nnz <= 60_000)
                     || (n >= 10_000 && nnz <= 100_000 && best_flops < amd_flops)
                 {
-                    let permuted2 = permute_pattern(&scoring_pat, &best_perm);
-                    let etree2 = EliminationTree::from_pattern(&permuted2);
-                    let post2 = etree2.postorder();
-                    let mut candidate2: Vec<usize> = post2.iter().map(|&j| best_perm[j]).collect();
-                    let post_pattern2 = permute_pattern(&scoring_pat, &candidate2);
-                    let post_etree2 = EliminationTree::from_pattern(&post_pattern2);
-                    let counts2: Vec<u32> = column_counts_gnp(&post_pattern2, &post_etree2)
-                        .into_iter()
-                        .map(|c| c as u32)
-                        .collect();
-                    let parent2: Vec<i32> = post_etree2
-                        .parent
-                        .iter()
-                        .map(|p| p.map_or(-1, |j| j as i32))
-                        .collect();
+                    let (mut candidate2, counts2, parent2, cand_flops2) =
+                        prepare_candidate_and_etree(&scoring_pat, &best_perm, best_flops);
+                    if cand_flops2 < best_flops {
+                        best_flops = cand_flops2;
+                        best_perm = candidate2.clone();
+                    }
                     let mut cfg2 = terminal_deep_subtree_cfg(n, nnz, best_flops, amd_flops);
                     cfg2.round = 6;
                     cfg2.min_s = 8;
@@ -1792,21 +1718,12 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                             if (n < 10_000 && nnz <= 100_000)
                                 || (n >= 10_000 && nnz <= 80_000 && best_flops < amd_flops)
                             {
-                                let permuted3 = permute_pattern(&scoring_pat, &best_perm);
-                                let etree3 = EliminationTree::from_pattern(&permuted3);
-                                let post3 = etree3.postorder();
-                                let mut candidate3: Vec<usize> = post3.iter().map(|&j| best_perm[j]).collect();
-                                let post_pattern3 = permute_pattern(&scoring_pat, &candidate3);
-                                let post_etree3 = EliminationTree::from_pattern(&post_pattern3);
-                                let counts3: Vec<u32> = column_counts_gnp(&post_pattern3, &post_etree3)
-                                    .into_iter()
-                                    .map(|c| c as u32)
-                                    .collect();
-                                let parent3: Vec<i32> = post_etree3
-                                    .parent
-                                    .iter()
-                                    .map(|p| p.map_or(-1, |j| j as i32))
-                                    .collect();
+                                let (mut candidate3, counts3, parent3, cand_flops3) =
+                                    prepare_candidate_and_etree(&scoring_pat, &best_perm, best_flops);
+                                if cand_flops3 < best_flops {
+                                    best_flops = cand_flops3;
+                                    best_perm = candidate3.clone();
+                                }
                                 let mut cfg3 = terminal_deep_subtree_cfg(n, nnz, best_flops, amd_flops);
                                 cfg3.round = 7;
                                 cfg3.min_s = 8;
@@ -1841,21 +1758,12 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // Large matrices are excluded: they own the local worst case, and an
     // additive pass there is what failed hidden validation in 0060.
     if best_flops < amd_flops && n < 10_000 && nnz <= 100_000 && n >= SUBTREE_MIN_N {
-        let permuted = permute_pattern(&scoring_pat, &best_perm);
-        let etree = EliminationTree::from_pattern(&permuted);
-        let post = etree.postorder();
-        let mut candidate: Vec<usize> = post.iter().map(|&j| best_perm[j]).collect();
-        let post_pattern = permute_pattern(&scoring_pat, &candidate);
-        let post_etree = EliminationTree::from_pattern(&post_pattern);
-        let counts: Vec<u32> = column_counts_gnp(&post_pattern, &post_etree)
-            .into_iter()
-            .map(|c| c as u32)
-            .collect();
-        let parent: Vec<i32> = post_etree
-            .parent
-            .iter()
-            .map(|p| p.map_or(-1, |j| j as i32))
-            .collect();
+        let (mut candidate, counts, parent, cand_flops) =
+            prepare_candidate_and_etree(&scoring_pat, &best_perm, best_flops);
+        if cand_flops < best_flops {
+            best_flops = cand_flops;
+            best_perm = candidate.clone();
+        }
         let mut extra = SUBTREE_CFG;
         extra.min_s = 16;
         extra.max_s = 512;
@@ -2898,6 +2806,200 @@ fn bfs_deepest(
     (best, max_d - 1)
 }
 
+/// Perform local tree rotations on the elimination tree before block selection
+/// to balance sibling separator sizes.
+///
+/// An elimination tree rotation on edge (u, v) where u = parent[v] swaps the
+/// ancestor-descendant relationship between u and v while reattaching each child
+/// subtree T(w) of v to u if T(w) contains a neighbor of u in the graph G, or
+/// leaving it attached to v otherwise (Cunha et al. 2024 / Liu 1988).
+///
+/// When sibling subtrees under u have unbalanced sizes (e.g. one large branch
+/// dominating its siblings), this rotation redistributes and partitions the
+/// branches between v and u, balancing sibling separator sizes so block selection
+/// in `subtree_refine` can discover eligible subtrees within [min_s, max_s].
+pub(crate) fn balance_elimination_tree_rotations(
+    pattern: &ScoringPattern,
+    etree: &mut EliminationTree,
+) {
+    let n = etree.n;
+    if n < 4 {
+        return;
+    }
+
+    let max_rotations = 32;
+    let mut rotations = 0;
+
+    for _ in 0..16 {
+        let children = etree.children();
+        // Compute bottom-up subtree sizes
+        let mut sizes = vec![1usize; n];
+        let mut deg = vec![0usize; n];
+        for u in 0..n {
+            deg[u] = children[u].len();
+        }
+        let mut queue: Vec<usize> = (0..n).filter(|&u| deg[u] == 0).collect();
+        let mut head = 0;
+        while head < queue.len() {
+            let u = queue[head];
+            head += 1;
+            if let Some(p) = etree.parent[u] {
+                sizes[p] += sizes[u];
+                deg[p] = deg[p].saturating_sub(1);
+                if deg[p] == 0 {
+                    queue.push(p);
+                }
+            }
+        }
+
+        let mut changed = false;
+        for u in 0..n {
+            if rotations >= max_rotations {
+                break;
+            }
+            if children[u].is_empty() {
+                continue;
+            }
+            // Find child v with maximum subtree size
+            let mut best_v = None;
+            let mut max_sz = 0;
+            let mut sum_sz = 0;
+            for &c in &children[u] {
+                sum_sz += sizes[c];
+                if sizes[c] > max_sz {
+                    max_sz = sizes[c];
+                    best_v = Some(c);
+                }
+            }
+            let v = match best_v {
+                Some(v) => v,
+                None => continue,
+            };
+            if children[v].is_empty() {
+                continue;
+            }
+
+            let other_sz = sum_sz - max_sz;
+            if max_sz <= other_sz && children[u].len() > 1 {
+                continue;
+            }
+
+            // Find children w of v that contain at least one neighbor of u in pattern
+            let mut w1 = Vec::new();
+            for &nbr in &pattern.row_idx[pattern.col_ptr[u]..pattern.col_ptr[u + 1]] {
+                if nbr == u || nbr == v || nbr >= n {
+                    continue;
+                }
+                let mut curr = nbr;
+                let mut steps = 0;
+                while let Some(p) = etree.parent[curr] {
+                    if p == v {
+                        if !w1.contains(&curr) {
+                            w1.push(curr);
+                        }
+                        break;
+                    }
+                    if p == u || steps >= 128 {
+                        break;
+                    }
+                    curr = p;
+                    steps += 1;
+                }
+            }
+
+            let mut sz_w1 = 0;
+            let mut max_w1 = 0;
+            for &w in &w1 {
+                sz_w1 += sizes[w];
+                if sizes[w] > max_w1 {
+                    max_w1 = sizes[w];
+                }
+            }
+
+            let mut sz_w2 = 0;
+            let mut max_w2 = 0;
+            for &w in &children[v] {
+                if !w1.contains(&w) {
+                    sz_w2 += sizes[w];
+                    if sizes[w] > max_w2 {
+                        max_w2 = sizes[w];
+                    }
+                }
+            }
+
+            // If W2 is empty, rotating would not split v's subtrees to balance siblings.
+            if sz_w2 == 0 {
+                continue;
+            }
+
+            let new_sz_u = 1 + other_sz + sz_w1;
+            let max_other = children[u]
+                .iter()
+                .filter(|&&c| c != v)
+                .map(|&c| sizes[c])
+                .max()
+                .unwrap_or(0);
+
+            // Maximum sibling size under v and u after rotation
+            let max_after = new_sz_u.max(max_w2).max(max_other).max(max_w1);
+
+            // Rotate if the largest sibling separator size strictly decreases,
+            // balancing the branches.
+            if max_after < max_sz {
+                let z = etree.parent[u];
+                etree.parent[v] = z;
+                etree.parent[u] = Some(v);
+                for &w in &w1 {
+                    etree.parent[w] = Some(u);
+                }
+                rotations += 1;
+                changed = true;
+                break;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+/// Prepares candidate permutation and elimination tree for subtree refinement,
+/// performing local tree rotations on the elimination tree before block selection
+/// to balance sibling separator sizes.
+fn prepare_candidate_and_etree(
+    scoring_pat: &ScoringPattern,
+    best_perm: &[usize],
+    best_flops: u64,
+) -> (Vec<usize>, Vec<u32>, Vec<i32>, u64) {
+    let permuted = permute_pattern(scoring_pat, best_perm);
+    let mut etree = EliminationTree::from_pattern(&permuted);
+    balance_elimination_tree_rotations(&permuted, &mut etree);
+    let post = etree.postorder();
+    let mut candidate: Vec<usize> = post.iter().map(|&j| best_perm[j]).collect();
+    let f_cand = flops_of(scoring_pat, &candidate);
+    let candidate_flops = if f_cand <= best_flops {
+        f_cand
+    } else {
+        let unrotated = EliminationTree::from_pattern(&permuted).postorder();
+        candidate = unrotated.iter().map(|&j| best_perm[j]).collect();
+        best_flops
+    };
+
+    let post_pattern = permute_pattern(scoring_pat, &candidate);
+    let post_etree = EliminationTree::from_pattern(&post_pattern);
+    let counts: Vec<u32> = column_counts_gnp(&post_pattern, &post_etree)
+        .into_iter()
+        .map(|c| c as u32)
+        .collect();
+    let parent: Vec<i32> = post_etree
+        .parent
+        .iter()
+        .map(|p| p.map_or(-1, |j| j as i32))
+        .collect();
+
+    (candidate, counts, parent, candidate_flops)
+}
+
 /// Predicted factorization flops `Σ_j c_j²` for `perm` on `pat`, via feral's
 /// pattern-pure symbolic building blocks — the exact quantity the grader ranks.
 fn flops_of(pat: &ScoringPattern, perm: &[usize]) -> u64 {
@@ -3464,4 +3566,97 @@ mod tests {
             assert!(requested_budget <= TERMINAL_SUBTREE_SEARCH_WORK_LIMIT);
         }
     }
+
+    #[test]
+    fn balance_elimination_tree_rotations_balances_and_preserves_validity() {
+        // Construct a graph with an unbalanced separator structure:
+        // Vertex 0 connects to a large branch (1..20) and a small branch (21..23).
+        // Vertex 1 connects to sub-branches (2..10) and (11..20).
+        let mut edges = Vec::new();
+        for i in 1..24 {
+            edges.push((0, i));
+        }
+        for i in 2..11 {
+            edges.push((1, i));
+        }
+        for i in 11..21 {
+            edges.push((1, i));
+        }
+        for i in 21..24 {
+            edges.push((i, 0));
+        }
+        let pattern = Pattern::from_edges(24, &edges);
+        let scoring_pat = ScoringPattern {
+            n: pattern.n,
+            col_ptr: pattern.col_ptr.clone(),
+            row_idx: pattern.row_idx.clone(),
+        };
+        let natural_perm: Vec<usize> = (0..24).collect();
+        let permuted = permute_pattern(&scoring_pat, &natural_perm);
+        let mut etree = EliminationTree::from_pattern(&permuted);
+
+        // Record initial postorder and sizes
+        let post_before = etree.postorder();
+        assert_eq!(post_before.len(), 24);
+        assert!(is_bijection(&post_before, 24));
+
+        balance_elimination_tree_rotations(&permuted, &mut etree);
+
+        // Rotated tree must remain a valid rooted forest
+        assert_eq!(etree.n, 24);
+        let post_after = etree.postorder();
+        assert_eq!(post_after.len(), 24);
+        assert!(is_bijection(&post_after, 24));
+
+        // In postorder, every child must strictly precede its parent
+        let mut pos = vec![0usize; 24];
+        for (idx, &v) in post_after.iter().enumerate() {
+            pos[v] = idx;
+        }
+        for v in 0..24 {
+            if let Some(p) = etree.parent[v] {
+                assert!(
+                    pos[v] < pos[p],
+                    "child {v} (pos {}) must precede parent {p} (pos {})",
+                    pos[v],
+                    pos[p]
+                );
+            }
+        }
+
+        // Test preparation helper
+        let f_orig = flops_of(&scoring_pat, &natural_perm);
+        let (cand, counts, parent, cand_flops) =
+            prepare_candidate_and_etree(&scoring_pat, &natural_perm, f_orig);
+        assert!(is_bijection(&cand, 24));
+        assert_eq!(counts.len(), 24);
+        assert_eq!(parent.len(), 24);
+        assert!(cand_flops <= f_orig);
+    }
+
+    #[test]
+    fn balance_elimination_tree_rotations_is_deterministic() {
+        let band: Vec<_> = (0..128)
+            .flat_map(|u| [1, 4, 16].map(move |step| (u, u + step)))
+            .filter(|&(_, v)| v < 128)
+            .collect();
+        let pat = Pattern::from_edges(128, &band);
+        let scoring_pat = ScoringPattern {
+            n: pat.n,
+            col_ptr: pat.col_ptr.clone(),
+            row_idx: pat.row_idx.clone(),
+        };
+        let perm: Vec<usize> = (0..128).collect();
+        let permuted = permute_pattern(&scoring_pat, &perm);
+
+        let mut etree1 = EliminationTree::from_pattern(&permuted);
+        let mut etree2 = EliminationTree::from_pattern(&permuted);
+
+        balance_elimination_tree_rotations(&permuted, &mut etree1);
+        balance_elimination_tree_rotations(&permuted, &mut etree2);
+
+        assert_eq!(etree1.parent, etree2.parent);
+        assert_eq!(etree1.postorder(), etree2.postorder());
+    }
 }
+
