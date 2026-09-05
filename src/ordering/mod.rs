@@ -1789,8 +1789,9 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
 
                             // Chained terminal round 3: runs on medium sparse matrices or sparse below-anchor large matrices
                             // where BOTH terminal round 1 AND round 2 found strict improvements.
-                            if (n < 10_000 && nnz <= 100_000)
-                                || (n >= 10_000 && nnz <= 80_000 && best_flops < amd_flops)
+                            if best_flops * 10 < amd_flops * 7
+                                && ((n < 10_000 && nnz <= 100_000)
+                                    || (n >= 10_000 && nnz <= 80_000))
                             {
                                 let permuted3 = permute_pattern(&scoring_pat, &best_perm);
                                 let etree3 = EliminationTree::from_pattern(&permuted3);
