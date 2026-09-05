@@ -907,6 +907,15 @@ pub(crate) fn stream_rng(k: usize) -> u64 {
     0x9E37_79B9_7F4A_7C15u64.wrapping_mul(2 * k as u64 + 1) ^ (k as u64) << 32
 }
 
+#[inline]
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
 pub(crate) fn stream_params(k: usize) -> Params {
     let mut p = Params::DEFAULT;
     match k % 4 {
@@ -2388,39 +2397,18 @@ pub(crate) fn subtree_refine(
                                 c * c
                             })
                             .sum();
-                        let seed: Vec<usize> = (0..ssz).collect();
+                        let seed_ord: Vec<usize> = (0..ssz).collect();
                         let mut best: Option<(Vec<usize>, u64)> = None;
                         let first_stream =
                             usize::from(split_ranked_streams && block_rank >= 32);
                         for k in first_stream..cfg.streams.max(1) {
-                            // Keep the same two searches and uniform-prefix
-                            // stream-1 policy, but use PEP's promoted second
-                            // seed to sample an independent subtree basin.
-                            let mut rng_seed = if n >= 10_000 && k == 1 {
-                                0xD1B5_4A32_D192_ED03
-                            } else {
-                                stream_rng(k)
-                            };
-                            // Round two otherwise repeats byte-for-byte on an
-                            // unchanged block. D1 is diversified everywhere;
-                            // diversify stream 0 on alternating top-32 ranks,
-                            // retaining the promoted trajectory on the other
-                            // half. No trajectories or work are added.
-                            if n >= 10_000 && k == 1 && cfg.round == 1 {
-                                rng_seed ^= 0xA076_1D64_78BD_642F;
-                            }
-                            if n >= 10_000
-                                && k == 0
-                                && cfg.round == 1
-                                && block_rank & 1 == 1
-                            {
-                                rng_seed ^= 0xE703_7ED1_A0B4_28DB;
-                            }
+                            let seed = stream_rng(k);
+                            let rng_seed = splitmix64(seed ^ (block_rank as u64));
                             let r = search_with_nelim(
                                 m,
                                 &adj0,
                                 ssz,
-                                &seed,
+                                &seed_ord,
                                 seed_flops,
                                 cfg.budget,
                                 rng_seed,
@@ -2580,6 +2568,16 @@ mod subtree_preparation_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn splitmix64_diversifies_seeds() {
+        let s0 = splitmix64(stream_rng(0));
+        let s1 = splitmix64(stream_rng(0) ^ 1);
+        let s2 = splitmix64(stream_rng(0) ^ 2);
+        assert_ne!(s0, s1);
+        assert_ne!(s1, s2);
+        assert_ne!(s0, s2);
     }
 }
 
