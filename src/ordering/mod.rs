@@ -1923,6 +1923,21 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                     }
                 }
             }
+            if let Some(cand) = rgreedy::adjacent_three_descent(
+                n,
+                &pattern.col_ptr,
+                &pattern.row_idx,
+                &best_perm,
+                1,
+                16_000_000,
+            ) {
+                let f = flops_of(&scoring_pat, &cand);
+                if f < best_flops {
+                    best_flops = f;
+                    best_perm = cand;
+                    round_improved = true;
+                }
+            }
             if let Some(cand) = rgreedy::adjacent_four_descent(
                 n,
                 &pattern.col_ptr,
