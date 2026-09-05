@@ -1399,6 +1399,8 @@ pub(crate) fn adjacent_triple_descent(
     changed.then_some(cur)
 }
 
+pub(crate) use adjacent_triple_descent as adjacent_three_descent;
+
 /// Exact widths after any subset of a fixed four-pivot window is eliminated.
 /// For the pivot's connected component C in H[S + pivot], a nonsingleton C
 /// has width |union N_H(C)| - |C| + 1. Every vertex of C is in that union,

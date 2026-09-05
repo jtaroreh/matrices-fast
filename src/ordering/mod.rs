@@ -1260,8 +1260,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -1928,6 +1928,21 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 &pattern.col_ptr,
                 &pattern.row_idx,
                 &best_perm,
+                pair_descent_ops_budget,
+            ) {
+                let f = flops_of(&scoring_pat, &cand);
+                if f < best_flops {
+                    best_flops = f;
+                    best_perm = cand;
+                    round_improved = true;
+                }
+            }
+            if let Some(cand) = rgreedy::adjacent_three_descent(
+                n,
+                &pattern.col_ptr,
+                &pattern.row_idx,
+                &best_perm,
+                1,
                 pair_descent_ops_budget,
             ) {
                 let f = flops_of(&scoring_pat, &cand);
