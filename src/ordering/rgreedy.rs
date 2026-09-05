@@ -1663,14 +1663,20 @@ pub(crate) fn adjacent_four_descent(
         }
         let mut k = offset;
         while k + 3 < n {
-            if !work.charge(four_window_work(words)) {
-                return changed.then_some(cur);
-            }
             let window = [cur[k], cur[k + 1], cur[k + 2], cur[k + 3]];
-            let (order, best, incumbent) = FourWindow::new(&game, window).solve();
-            if best < incumbent {
-                cur[k..k + 4].copy_from_slice(&order.map(|i| window[i]));
-                changed = true;
+            let d0 = game.deg[window[0]];
+            let d1 = game.deg[window[1]];
+            let d2 = game.deg[window[2]];
+            let d3 = game.deg[window[3]];
+            if !(d0 <= d1 && d1 <= d2 && d2 <= d3) {
+                if !work.charge(four_window_work(words)) {
+                    return changed.then_some(cur);
+                }
+                let (order, best, incumbent) = FourWindow::new(&game, window).solve();
+                if best < incumbent {
+                    cur[k..k + 4].copy_from_slice(&order.map(|i| window[i]));
+                    changed = true;
+                }
             }
             k += 4;
             if k + 3 < n {
@@ -3302,6 +3308,21 @@ mod four_window_tests {
         }
         assert!(improvements > 0);
         println!("FOUR_CANONICAL improving_cases={improvements}");
+    }
+
+    #[test]
+    fn four_window_degree_precheck_rejects_monotonic_window() {
+        let mut edges = vec![(1, 2), (2, 3), (1, 3)];
+        for v in 5..8 {
+            edges.push((4, v));
+        }
+        let pat = Pattern::from_edges(8, &edges);
+        let seed: Vec<_> = (0..8).collect();
+        let candidate = adjacent_four_descent(8, &pat.col_ptr, &pat.row_idx, &seed, 4900)
+            .expect("second window improves because monotonic first window bypassed evaluation charge");
+        assert_eq!(&candidate[..4], &seed[..4]);
+        assert_ne!(&candidate[4..], &seed[4..]);
+        assert!(canonical(&pat, &candidate) < canonical(&pat, &seed));
     }
 }
 
