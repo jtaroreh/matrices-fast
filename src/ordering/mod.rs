@@ -553,7 +553,11 @@ fn relabel_restarts_tuned(budget: usize, cap: usize, n: usize, nnz: usize, max_d
     } else if nnz <= 20_000 {
         (600_000 / nnz).min(48) // Low-nnz regime
     } else if nnz <= 150_000 && max_deg * 50 <= n {
-        base_r.max(12) // Mid-band non-hub floor
+        if n >= 10_000 {
+            base_r.max(8)
+        } else {
+            base_r.max(12) // Mid-band non-hub floor
+        }
     } else if nnz <= 350_000 && nnz <= 5 * n && max_deg * 50 <= n && n >= 10_000 {
         base_r.max(8) // Sparse gt_10k mesh/network floor (unstarving transswitch & powerflow)
     } else {
@@ -719,7 +723,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // eligible matrix STRICTLY below the slowest tier (`nnz ≥ 163 k`), where a
     // few AMD passes are milliseconds — so the worst-case time is held
     // byte-for-byte. Best-of floor makes all three variants pure upside.
-    if n < ROBUST_MAX_N && nnz < ROBUST_MAX_NNZ {
+    if n < ROBUST_MAX_N && nnz < ROBUST_MAX_NNZ && (nnz <= 12 * n || nnz <= 150_000) {
         let amd_robust = feral_amd::AmdOptions {
             aggressive: false,
             dense_alpha: 10.0,
@@ -1504,6 +1508,29 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 &parent,
                 cfg1,
             );
+            if improved == 0
+                && best_flops < amd_flops
+                && n <= 4_000
+                && nnz <= 30_000
+            {
+                cfg1.round = 2;
+                if n < 1_000 {
+                    cfg1.streams = 2;
+                    cfg1.budget = 1_000_000;
+                    cfg1.max_s = 256;
+                } else {
+                    cfg1.max_s = 384;
+                }
+                improved = rgreedy::subtree_refine(
+                    n,
+                    &pattern.col_ptr,
+                    &pattern.row_idx,
+                    &mut candidate,
+                    &counts,
+                    &parent,
+                    cfg1,
+                );
+            }
         }
         if improved > 0 && is_bijection(&candidate, n) {
             let f = flops_of(&scoring_pat, &candidate);
@@ -1532,7 +1559,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                     .collect();
                 let mut cfg2 = subtree_cfg_for(n, nnz);
                 cfg2.round = 1;
-                cfg2.max_blocks = 32;
+                cfg2.max_blocks = if n >= 10_000 { 16 } else { 32 };
                 cfg2.min_s = 16;
                 cfg2.budget = 8_000_000;
                 // Wider round-2 window only on below-anchor medium graphs.
@@ -1542,7 +1569,6 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                     cfg2.max_s = 256;
                 }
                 let improved2 = rgreedy::subtree_refine(
-
                     n,
                     &pattern.col_ptr,
                     &pattern.row_idx,
@@ -1586,7 +1612,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                             .collect();
                         let mut cfg3 = subtree_cfg_for(n, nnz);
                         cfg3.round = 1;
-                        cfg3.max_blocks = 32;
+                        cfg3.max_blocks = if n >= 10_000 { 16 } else { 32 };
                         cfg3.min_s = 16;
                         cfg3.max_s = 512;
                         cfg3.budget = 8_000_000;
@@ -1633,7 +1659,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                     .collect();
                                 let mut cfg4 = subtree_cfg_for(n, nnz);
                                 cfg4.round = 3;
-                                cfg4.max_blocks = 32;
+                                cfg4.max_blocks = if n >= 10_000 { 16 } else { 32 };
                                 cfg4.min_s = 16;
                                 cfg4.max_s = 768;
                                 cfg4.budget = if (1_000..6_000).contains(&n) {
@@ -1684,7 +1710,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                                 cfg5.max_blocks = 16;
                                                 cfg5.budget = 32_000_000;
                                             } else {
-                                                cfg5.max_blocks = 32;
+                                                cfg5.max_blocks = if n >= 10_000 { 16 } else { 32 };
                                                 cfg5.budget = 16_000_000;
                                             }
                                             let improved5 = rgreedy::subtree_refine(
