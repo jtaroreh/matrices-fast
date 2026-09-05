@@ -1475,8 +1475,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         // cannot displace a winning basin.
         if improved == 0
             && best_flops < amd_flops
-            && n <= 80_000
-            && nnz <= 250_000
+            && n <= 4_000
+            && nnz <= 30_000
         {
             cfg1.round = 1;
             if n < 1_000 {
