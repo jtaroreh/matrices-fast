@@ -845,7 +845,13 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             Ok::<Vec<i32>, feral_ordering_core::OrderingError>(minfill_order(pattern))
         });
         if n < 2_000 && nnz < 10_000 {
-            let minfill_restarts = if n < 1_000 && nnz < 5_000 { 12 } else { 6 };
+            let minfill_restarts = if n <= 500 && nnz <= 5_000 {
+                20
+            } else if n < 1_000 && nnz < 5_000 {
+                12
+            } else {
+                6
+            };
             for seed in 1..=minfill_restarts {
                 let q = relabel(n, seed);
                 let b = permute_pattern(&scoring_pat, &q);
