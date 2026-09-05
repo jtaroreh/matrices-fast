@@ -426,7 +426,8 @@ fn subtree_cfg_for(n: usize, nnz: usize) -> rgreedy::SubCfg {
         cfg.budget = 2_000_000;
     } else if n >= 10_000 {
         cfg.max_s = LARGE_MAX_S;
-        cfg.max_blocks = LARGE_BLOCKS;
+        let avg_deg = (nnz / n).max(1);
+        cfg.max_blocks = (LARGE_BLOCKS * 10 / avg_deg).clamp(1, LARGE_BLOCKS);
         cfg.budget = LARGE_BUDGET;
         if nnz <= n * 10 && nnz <= 150_000 {
             cfg.max_sub = 1_600;
@@ -1260,8 +1261,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let well_below;
-    let medium_exact_gate;
+
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -1311,10 +1311,10 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         }
     }
 
-    well_below = amd_flops > 0
+    let well_below = amd_flops > 0
         && best_flops < amd_flops
         && best_flops.saturating_mul(5) < amd_flops.saturating_mul(4);
-    medium_exact_gate = n > 1_000
+    let medium_exact_gate = n > 1_000
         && n <= 6_000
         && (nnz <= 30_000 || (well_below && nnz <= 50_000));
 
