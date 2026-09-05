@@ -60,20 +60,34 @@ fn rank_product(value: u64, value_power: usize, len: usize, len_power: usize) ->
     product
 }
 
-pub(crate) fn rank_alpha_three_quarters_cmp(
+/// Compare candidate elimination-tree subtrees by estimated efficiency density
+/// (`delta_flops / size^1.5`).
+///
+/// Squaring both sides yields `delta_flops^2 / size^3`. Cross-multiplying yields:
+/// `b.2^2 * len_a^3` vs `a.2^2 * len_b^3`.
+/// Deterministic tie-breaking falls back to larger flop contribution (`b.2.cmp(&a.2)`),
+/// then larger root position (`b.1.cmp(&a.1)`).
+pub(crate) fn rank_efficiency_density_cmp(
     a: &(usize, usize, u64),
     b: &(usize, usize, u64),
 ) -> std::cmp::Ordering {
     let len_a = a.1 + 1 - a.0;
     let len_b = b.1 + 1 - b.0;
-    let b_cross = rank_product(b.2, 4, len_a, 3);
-    let a_cross = rank_product(a.2, 4, len_b, 3);
+    let b_cross = rank_product(b.2, 2, len_a, 3);
+    let a_cross = rank_product(a.2, 2, len_b, 3);
     b_cross
         .iter()
         .rev()
         .cmp(a_cross.iter().rev())
         .then_with(|| b.2.cmp(&a.2))
         .then_with(|| b.1.cmp(&a.1))
+}
+
+pub(crate) fn rank_alpha_three_quarters_cmp(
+    a: &(usize, usize, u64),
+    b: &(usize, usize, u64),
+) -> std::cmp::Ordering {
+    rank_efficiency_density_cmp(a, b)
 }
 
 /// Largest `n` this module will allocate for. Memory is `2 · n · ⌈n/64⌉ · 8`
@@ -818,8 +832,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add(best / par.accept_den * par.accept_num);
+        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] }.saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -2297,17 +2311,17 @@ pub(crate) fn subtree_refine(
         let mut ranked: Vec<(usize, usize, u64)> = blocks
             .drain(..)
             .map(|(a, b)| {
-                let contribution = counts[a..=b]
+                let delta_flops = counts[a..=b]
                     .iter()
                     .map(|&c| {
                         let c = c as u64;
                         c * c
                     })
                     .sum();
-                (a, b, contribution)
+                (a, b, delta_flops)
             })
             .collect();
-        ranked.sort_by(rank_alpha_three_quarters_cmp);
+        ranked.sort_by(rank_efficiency_density_cmp);
         let ranked_limit = if split_ranked_streams {
             96
         } else {
@@ -2475,8 +2489,7 @@ pub(crate) struct SubCfg {
     /// Streams per block (sequential here; the caller parallelises over
     /// blocks, which is the coarser and cheaper axis).
     pub(crate) streams: usize,
-    /// Select blocks by exact incumbent objective contribution divided by
-    /// subtree size to the three-quarter power.
+    /// Select blocks by estimated efficiency density (delta_flops / size^1.5).
     pub(crate) rank_blocks: bool,
     /// Zero-based outer RGSUB round, used only to diversify an equal-work seed.
     pub(crate) round: usize,
@@ -2580,6 +2593,58 @@ mod subtree_preparation_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod efficiency_density_ranking_tests {
+    use super::*;
+
+    #[test]
+    fn ranks_by_efficiency_density_not_raw_flops() {
+        // Block A: size = 4, delta_flops = 16. density = 16 / 4^1.5 = 16 / 8 = 2.0 (density^2 = 4.0)
+        // Block B: size = 8, delta_flops = 45. density = 45 / 8^1.5 ≈ 1.9888 (density^2 = 3.955)
+        // Raw flops: B (45) > A (16).
+        // Efficiency density: A (2.0) > B (1.9888).
+        let block_a = (0, 3, 16);
+        let block_b = (4, 11, 45);
+
+        let mut blocks = vec![block_b, block_a];
+        blocks.sort_by(rank_efficiency_density_cmp);
+        assert_eq!(blocks, vec![block_a, block_b]);
+    }
+
+    #[test]
+    fn tie_breaking_prefers_larger_delta_flops_then_root_position() {
+        // Equal density:
+        // C: size = 1, delta_flops = 10, root = 0. density = 10.0 (density^2 = 100)
+        // D: size = 4, delta_flops = 80, root = 4. density = 80 / 8 = 10.0 (density^2 = 100)
+        // Raw flops tie-break: D (80) > C (10).
+        let block_c = (0, 0, 10);
+        let block_d = (1, 4, 80);
+        let mut blocks1 = vec![block_c, block_d];
+        blocks1.sort_by(rank_efficiency_density_cmp);
+        assert_eq!(blocks1, vec![block_d, block_c]);
+
+        // Equal density AND equal delta_flops:
+        // E: range 0..=3 (size = 4, root = 3), delta_flops = 16
+        // F: range 4..=7 (size = 4, root = 7), delta_flops = 16
+        // Root position tie-break: F (root = 7) > E (root = 3).
+        let block_e = (0, 3, 16);
+        let block_f = (4, 7, 16);
+        let mut blocks2 = vec![block_e, block_f];
+        blocks2.sort_by(rank_efficiency_density_cmp);
+        assert_eq!(blocks2, vec![block_f, block_e]);
+    }
+
+    #[test]
+    fn legacy_comparator_alias_matches_efficiency_density() {
+        let block_a = (0, 3, 16);
+        let block_b = (4, 11, 45);
+        assert_eq!(
+            rank_alpha_three_quarters_cmp(&block_a, &block_b),
+            rank_efficiency_density_cmp(&block_a, &block_b)
+        );
     }
 }
 
