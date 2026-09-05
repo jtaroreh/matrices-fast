@@ -1627,7 +1627,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                 cfg4.round = 3;
                                 cfg4.max_blocks = 32;
                                 cfg4.min_s = 16;
-                                cfg4.max_s = 768;
+                                cfg4.max_s = (n / 12).clamp(128, 768);
                                 cfg4.budget = if (1_000..6_000).contains(&n) {
                                     64_000_000
                                 } else {
