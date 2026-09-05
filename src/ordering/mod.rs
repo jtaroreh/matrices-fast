@@ -417,8 +417,8 @@ fn subtree_cfg_for(n: usize, nnz: usize) -> rgreedy::SubCfg {
     if n < 64 {
         cfg.min_s = 8;
         cfg.max_s = 32;
-        cfg.max_blocks = 8;
-        cfg.budget = 1_000_000;
+        cfg.max_blocks = 12;
+        cfg.budget = 1_500_000;
     } else if n < 1_000 {
         cfg.min_s = 16;
         cfg.max_s = 256;
