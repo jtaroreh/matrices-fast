@@ -791,6 +791,25 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         consider(&|| {
             Ok::<Vec<i32>, feral_ordering_core::OrderingError>(sloan_order(pattern, 1, 2))
         });
+        if n <= 2_000 && nnz <= 25_000 {
+            for seed in 1..=4 {
+                let q = relabel(n, seed);
+                let b = permute_pattern(&scoring_pat, &q);
+                let b_pat = Pattern {
+                    n,
+                    col_ptr: b.col_ptr,
+                    row_idx: b.row_idx,
+                };
+                consider(&|| {
+                    let pb = sloan_order(&b_pat, 2, 1);
+                    Ok(pb.into_iter().map(|x| q[x as usize] as i32).collect())
+                });
+                consider(&|| {
+                    let pb = sloan_order(&b_pat, 1, 2);
+                    Ok(pb.into_iter().map(|x| q[x as usize] as i32).collect())
+                });
+            }
+        }
     }
 
     // Hand-rolled NESTED DISSECTION — our OWN pure-Rust recursive graph bisection
@@ -3131,6 +3150,41 @@ mod tests {
         }
         let pat = Pattern::from_edges(n, &edges);
         assert_eq!(sloan_order(&pat, 2, 1), sloan_order(&pat, 2, 1));
+    }
+
+    /// Relabelled Sloan restarts must always produce valid bijections and be deterministic.
+    #[test]
+    fn relabelled_sloan_is_valid_and_deterministic() {
+        let n = 120;
+        let mut edges = Vec::new();
+        for v in 0..n - 1 {
+            edges.push((v, v + 1));
+        }
+        for v in 0..n - 7 {
+            edges.push((v, v + 7));
+        }
+        let pat = Pattern::from_edges(n, &edges);
+        let scoring_pat = ScoringPattern {
+            n,
+            col_ptr: pat.col_ptr.clone(),
+            row_idx: pat.row_idx.clone(),
+        };
+        for seed in 1..=4 {
+            let q = relabel(n, seed);
+            let b = permute_pattern(&scoring_pat, &q);
+            let b_pat = Pattern {
+                n,
+                col_ptr: b.col_ptr,
+                row_idx: b.row_idx,
+            };
+            for &(w1, w2) in &[(2, 1), (1, 2)] {
+                let p1 = sloan_order(&b_pat, w1, w2);
+                let p2 = sloan_order(&b_pat, w1, w2);
+                assert_eq!(p1, p2, "relabelled sloan determinism failure at seed {seed}");
+                let composed: Vec<usize> = p1.into_iter().map(|x| q[x as usize]).collect();
+                assert_bijection(&composed, n);
+            }
+        }
     }
 
     /// Hand-rolled nested dissection must always return a valid bijection,
