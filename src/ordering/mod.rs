@@ -1487,6 +1487,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             } else {
                 cfg1.max_s = 512;
             }
+            candidate.reverse();
             improved = rgreedy::subtree_refine(
                 n,
                 &pattern.col_ptr,
