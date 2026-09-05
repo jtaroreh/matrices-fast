@@ -410,8 +410,8 @@ const LARGE_BLOCKS: usize = 16;
 const LARGE_BUDGET: i64 = 2_000_000;
 
 /// Per-matrix base config for one chain round. On a short elimination tree the
-/// default `min_s = 32` admits almost no blocks, so drop the block floor to 16
-/// below `n = 1_000` — the same floor the terminal deep pass already uses.
+/// default `min_s = 32` admits almost no blocks, so drop the block floor to 8
+/// for `n <= 1_000` to enable fine-grained subtree cluster refinement.
 fn subtree_cfg_for(n: usize, nnz: usize) -> rgreedy::SubCfg {
     let mut cfg = SUBTREE_CFG;
     if n < 64 {
@@ -419,8 +419,8 @@ fn subtree_cfg_for(n: usize, nnz: usize) -> rgreedy::SubCfg {
         cfg.max_s = 32;
         cfg.max_blocks = 8;
         cfg.budget = 1_000_000;
-    } else if n < 1_000 {
-        cfg.min_s = 16;
+    } else if n <= 1_000 {
+        cfg.min_s = 8;
         cfg.max_s = 256;
         cfg.max_blocks = 16;
         cfg.budget = 2_000_000;
