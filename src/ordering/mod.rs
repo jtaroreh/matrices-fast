@@ -553,11 +553,7 @@ fn relabel_restarts_tuned(budget: usize, cap: usize, n: usize, nnz: usize, max_d
     } else if nnz <= 20_000 {
         (600_000 / nnz).min(48) // Low-nnz regime
     } else if nnz <= 150_000 && max_deg * 50 <= n {
-        if n >= 10_000 {
-            base_r.max(8)
-        } else {
-            base_r.max(12) // Mid-band non-hub floor
-        }
+        base_r.max(12) // Trace
     } else if nnz <= 350_000 && nnz <= 5 * n && max_deg * 50 <= n && n >= 10_000 {
         base_r.max(8) // Sparse gt_10k mesh/network floor (unstarving transswitch & powerflow)
     } else {
@@ -1064,6 +1060,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // `memory/experiments/0004-structured-relabelings.md`. Do not re-derive this;
     // if you want more from this family, buy more restarts, not smarter ones.
     let (relabel_budget, relabel_cap) = relabel_budget_and_cap(n);
+    let base_restarts = relabel_restarts(relabel_budget, relabel_cap, nnz);
     let restarts = relabel_restarts_tuned(relabel_budget, relabel_cap, n, nnz, max_deg);
     for r in 0..restarts {
         let seed = r as u64 + 1;
@@ -1137,11 +1134,12 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // a ratio, never raise it — and TIME is the only thing at stake. See
     // `RELABEL_AMF_MAX_NNZ` for how that is bounded.
     if nnz <= RELABEL_AMF_MAX_NNZ {
+        let amf_restarts = if n >= 10_000 { base_restarts.min(4) } else { restarts };
         let amf_alphas = [5.0f64, 2.0, -1.0, 1.0, 16.0];
         let num_passes: usize = if nnz <= 80_000 { 2 } else { 1 };
         for pass in 0..num_passes {
             let seed_offset = pass as u64 * 1000;
-            for r in 0..restarts {
+            for r in 0..amf_restarts {
                 let seed = seed_offset + r as u64 + 1;
                 let da = amf_alphas[(r + pass) % amf_alphas.len()];
                 let amf_relabel_opts = feral_amf::AmfOptions {
