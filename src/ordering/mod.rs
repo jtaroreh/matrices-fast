@@ -1260,8 +1260,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -1669,12 +1669,30 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                             .iter()
                                             .map(|p| p.map_or(-1, |j| j as i32))
                                             .collect();
+                                        let mut depth5 = vec![1usize; n];
+                                        let mut tree_height5 = 0;
+                                        for j in 0..n {
+                                            let d = depth5[j];
+                                            if d > tree_height5 {
+                                                tree_height5 = d;
+                                            }
+                                            let p = parent5[j];
+                                            if p >= 0 {
+                                                let pu = p as usize;
+                                                if depth5[pu] < d + 1 {
+                                                    depth5[pu] = d + 1;
+                                                }
+                                            }
+                                        }
+                                        let is_deep_tree = tree_height5 >= 256
+                                            || tree_height5 * 4 >= n
+                                            || (1_000..4_000).contains(&n);
                                         let mut cfg5 = subtree_cfg_for(n, nnz);
                                         cfg5.round = 4;
                                         if n < 100_000 || best_flops != amd_flops {
-                                            if (1_000..4_000).contains(&n) {
+                                            if is_deep_tree {
                                                 cfg5.max_blocks = 16;
-                                                cfg5.budget = 32_000_000;
+                                                cfg5.budget = 16_000_000;
                                             } else {
                                                 cfg5.max_blocks = 32;
                                                 cfg5.budget = 16_000_000;
