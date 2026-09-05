@@ -1178,11 +1178,15 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // nnz cap keeps this off the local worst-case matrices.
     let extra_relabel = amd_flops > 0
         && best_flops < amd_flops
-        && best_flops.saturating_mul(5) < amd_flops.saturating_mul(4)
+        && best_flops.saturating_mul(20) < amd_flops.saturating_mul(17)
         && nnz > 0
         && nnz <= 100_000;
     if extra_relabel {
-        let extra = if n >= 10_000 { 12usize } else { 16 };
+        let extra = if best_flops.saturating_mul(5) < amd_flops.saturating_mul(4) {
+            if n >= 10_000 { 12usize } else { 16 }
+        } else {
+            8usize
+        };
         for r in 0..extra {
             let seed = 50_000u64 + r as u64;
             let q = relabel(n, seed);
@@ -1314,6 +1318,9 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     well_below = amd_flops > 0
         && best_flops < amd_flops
         && best_flops.saturating_mul(5) < amd_flops.saturating_mul(4);
+    let below_85 = amd_flops > 0
+        && best_flops < amd_flops
+        && best_flops.saturating_mul(20) < amd_flops.saturating_mul(17);
     medium_exact_gate = n > 1_000
         && n <= 6_000
         && (nnz <= 30_000 || (well_below && nnz <= 50_000));
@@ -1342,6 +1349,14 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 (50_000_000, 0x45A1_89C3_F208_7314),
                 (100_000_000, 0xA076_1D64_78BD_642F),
                 (50_000_000, 0xE703_7ED1_A0B4_28DB),
+            ]
+        } else if below_85 {
+            &[
+                (100_000_000i64, 0x9E37_79B9_7F4A_7C15u64),
+                (50_000_000, 0xD1B5_4A32_D192_ED03),
+                (50_000_000, 0x27BB_2EE6_87B0_B0FD),
+                (50_000_000, 0x45A1_89C3_F208_7314),
+                (100_000_000, 0xA076_1D64_78BD_642F),
             ]
         } else {
             &[
@@ -3464,4 +3479,23 @@ mod tests {
             assert!(requested_budget <= TERMINAL_SUBTREE_SEARCH_WORK_LIMIT);
         }
     }
+
+    #[test]
+    fn test_tier_85_budget_allocation() {
+        let amd = 1000u64;
+        // Tier 1: ratio < 0.80
+        let best_79 = 790u64;
+        assert!(best_79.saturating_mul(5) < amd.saturating_mul(4));
+        assert!(best_79.saturating_mul(20) < amd.saturating_mul(17));
+
+        // Tier 2: 0.80 <= ratio < 0.85 (8 extra relabel tickets, 1 extra LNS stream)
+        let best_82 = 820u64;
+        assert!(!(best_82.saturating_mul(5) < amd.saturating_mul(4)));
+        assert!(best_82.saturating_mul(20) < amd.saturating_mul(17));
+
+        // Tier 3: ratio >= 0.85
+        let best_85 = 850u64;
+        assert!(!(best_85.saturating_mul(20) < amd.saturating_mul(17)));
+    }
 }
+
