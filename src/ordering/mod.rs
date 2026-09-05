@@ -1260,8 +1260,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -1487,6 +1487,23 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             } else {
                 cfg1.max_s = 512;
             }
+            improved = rgreedy::subtree_refine(
+                n,
+                &pattern.col_ptr,
+                &pattern.row_idx,
+                &mut candidate,
+                &counts,
+                &parent,
+                cfg1,
+            );
+        }
+        if improved == 0
+            && best_flops < amd_flops
+            && (1_000..=6_000).contains(&n)
+            && nnz <= 50_000
+        {
+            cfg1.round = 2;
+            cfg1.max_s = 384;
             improved = rgreedy::subtree_refine(
                 n,
                 &pattern.col_ptr,
@@ -3441,6 +3458,17 @@ mod tests {
                 .saturating_mul(cfg.streams.max(1) as i64);
             assert!(requested_budget <= SUBTREE_SEARCH_WORK_LIMIT);
             let _ = (best, amd);
+        }
+
+        for (n, nnz) in [(1_000usize, 50_000usize), (6_000, 50_000)] {
+            let mut cfg = subtree_cfg_for(n, nnz);
+            cfg.round = 2;
+            cfg.max_s = 384;
+            let requested_budget = cfg
+                .budget
+                .saturating_mul(cfg.max_blocks as i64)
+                .saturating_mul(cfg.streams.max(1) as i64);
+            assert!(requested_budget <= SUBTREE_SEARCH_WORK_LIMIT);
         }
 
         let mut extra = SUBTREE_CFG;
