@@ -1741,6 +1741,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         if improved > 0 && is_bijection(&candidate, n) {
             let f = flops_of(&scoring_pat, &candidate);
             if f < incumbent_flops {
+                let p1_rel_gain = (incumbent_flops.saturating_sub(f) as f64) / (incumbent_flops as f64);
                 best_flops = f;
                 best_perm = candidate;
 
@@ -1784,6 +1785,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                     if improved2 > 0 && is_bijection(&candidate2, n) {
                         let f2 = flops_of(&scoring_pat, &candidate2);
                         if f2 < f {
+                            let p2_rel_gain = (f.saturating_sub(f2) as f64) / (f as f64);
                             best_flops = f2;
                             best_perm = candidate2;
 
@@ -1825,8 +1827,56 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                 if improved3 > 0 && is_bijection(&candidate3, n) {
                                     let f3 = flops_of(&scoring_pat, &candidate3);
                                     if f3 < f2 {
+                                        let p3_rel_gain = (f2.saturating_sub(f3) as f64) / (f2 as f64);
                                         best_flops = f3;
                                         best_perm = candidate3;
+
+                                        // Chained terminal pass 4: strictly for n <= 5,000, nnz <= 30,000
+                                        // when passes 1, 2, and 3 all improved by > 0.2%.
+                                        if n <= 5_000
+                                            && nnz <= 30_000
+                                            && p1_rel_gain > 0.002
+                                            && p2_rel_gain > 0.002
+                                            && p3_rel_gain > 0.002
+                                        {
+                                            let permuted4 = permute_pattern(&scoring_pat, &best_perm);
+                                            let etree4 = EliminationTree::from_pattern(&permuted4);
+                                            let post4 = etree4.postorder();
+                                            let mut candidate4: Vec<usize> = post4.iter().map(|&j| best_perm[j]).collect();
+                                            let post_pattern4 = permute_pattern(&scoring_pat, &candidate4);
+                                            let post_etree4 = EliminationTree::from_pattern(&post_pattern4);
+                                            let counts4: Vec<u32> = column_counts_gnp(&post_pattern4, &post_etree4)
+                                                .into_iter()
+                                                .map(|c| c as u32)
+                                                .collect();
+                                            let parent4: Vec<i32> = post_etree4
+                                                .parent
+                                                .iter()
+                                                .map(|p| p.map_or(-1, |j| j as i32))
+                                                .collect();
+                                            let mut cfg4 = terminal_deep_subtree_cfg(n, nnz, best_flops, amd_flops);
+                                            cfg4.round = 8;
+                                            cfg4.min_s = 8;
+                                            cfg4.max_s = if n >= 10_000 { 512 } else { 384 };
+                                            cfg4.max_blocks = if best_flops < amd_flops { 4 } else { 2 };
+                                            cfg4.budget = 4_000_000;
+                                            let improved4 = rgreedy::subtree_refine(
+                                                n,
+                                                &pattern.col_ptr,
+                                                &pattern.row_idx,
+                                                &mut candidate4,
+                                                &counts4,
+                                                &parent4,
+                                                cfg4,
+                                            );
+                                            if improved4 > 0 && is_bijection(&candidate4, n) {
+                                                let f4 = flops_of(&scoring_pat, &candidate4);
+                                                if f4 < f3 {
+                                                    best_flops = f4;
+                                                    best_perm = candidate4;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
