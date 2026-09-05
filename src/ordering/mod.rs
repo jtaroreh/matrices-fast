@@ -203,6 +203,8 @@ const ROBUST_MAX_NNZ: usize = 600_000;
 /// gt_10k ties. Best-of floor makes it zero-downside.
 const RCM_MAX_N: usize = 150_000;
 const RCM_MAX_NNZ: usize = 130_000;
+const RCM_MULTI_START_MAX_N: usize = 3_000;
+const RCM_MULTI_START_RESTARTS: usize = 8;
 
 /// Sloan profile/wavefront-reduction envelope. Sloan is pure Rust, O(nnz log n)
 /// — a few milliseconds even at large n — so it is bounded PRIMARILY by nnz. The
@@ -772,6 +774,21 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         consider(&|| {
             Ok::<Vec<i32>, feral_ordering_core::OrderingError>(rcm_order(pattern))
         });
+        if n <= RCM_MULTI_START_MAX_N {
+            for seed in 1..=RCM_MULTI_START_RESTARTS {
+                let q = relabel(n, seed as u64);
+                let b = permute_pattern(&scoring_pat, &q);
+                let b_pat = Pattern {
+                    n,
+                    col_ptr: b.col_ptr,
+                    row_idx: b.row_idx,
+                };
+                consider(&|| {
+                    let pb = rcm_order(&b_pat);
+                    Ok(pb.into_iter().map(|x| q[x as usize] as i32).collect())
+                });
+            }
+        }
     }
 
     // Sloan wavefront/profile reduction — a pure-Rust O(nnz log n) ordering from
@@ -3088,6 +3105,37 @@ mod tests {
         let perm2: Vec<usize> =
             rcm_order(&empty).into_iter().map(|x| x as usize).collect();
         assert_bijection(&perm2, 12);
+    }
+
+    /// Relabelled RCM must always return valid bijections across restarts.
+    #[test]
+    fn relabelled_rcm_is_a_valid_bijection() {
+        let n = 50;
+        let mut edges = Vec::new();
+        for v in 0..20 {
+            edges.push((v, v + 1));
+        }
+        for v in 25..40 {
+            edges.push((v, v + 1));
+        }
+        let pat = Pattern::from_edges(n, &edges);
+        let scoring_pat = ScoringPattern {
+            n,
+            col_ptr: pat.col_ptr.clone(),
+            row_idx: pat.row_idx.clone(),
+        };
+        for seed in 1..=RCM_MULTI_START_RESTARTS {
+            let q = relabel(n, seed as u64);
+            let b = permute_pattern(&scoring_pat, &q);
+            let b_pat = Pattern {
+                n,
+                col_ptr: b.col_ptr,
+                row_idx: b.row_idx,
+            };
+            let pb = rcm_order(&b_pat);
+            let perm: Vec<usize> = pb.into_iter().map(|x| q[x as usize]).collect();
+            assert_bijection(&perm, n);
+        }
     }
 
     /// Sloan must always return a valid bijection, including on a disconnected
