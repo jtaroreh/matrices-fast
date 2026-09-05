@@ -819,7 +819,7 @@ pub(crate) fn search_with_nelim(
         let wi = it % nwalk;
         it += 1;
         let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] }.saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -2324,135 +2324,129 @@ pub(crate) fn subtree_refine(
         return 0;
     }
 
-    // ── search the blocks, in parallel over BLOCKS ──────────────────────────
-    // Blocks are disjoint position ranges and each builds its own local
-    // subgraph from the ORIGINAL pattern, so there is no shared mutable state:
-    // the threads only READ `perm` and return `(start, new order)` pairs that
-    // are applied afterwards to disjoint ranges. Completion order therefore
-    // cannot affect the result. Parallelising over blocks rather than over
-    // search streams is the cheaper axis — a block's search is short, and this
-    // way all four vCPUs stay busy even on a matrix with one big block set.
-    let nthreads = 4.max(1).min(blocks.len());
-    let perm_ro: &[usize] = perm;
-    let blocks_ro: &[(usize, usize)] = &blocks;
-    let parts: Vec<Vec<(usize, Vec<usize>)>> = std::thread::scope(|sc| {
-        let handles: Vec<_> = (0..nthreads)
-            .map(|t| {
-                sc.spawn(move || {
-                    let mut local: Vec<u32> = vec![u32::MAX; n];
-                    let mut touched: Vec<usize> = Vec::new();
-                    let mut verts: Vec<usize> = Vec::new();
-                    let mut got: Vec<(usize, Vec<usize>)> = Vec::new();
-                    let mut bi = t;
-                    while bi < blocks_ro.len() {
-                        let block_rank = bi;
-                        let (a, b) = blocks_ro[bi];
-                        bi += nthreads;
-                        let ssz = b + 1 - a;
-                        if !collect_subtree_vertices(
-                            col_ptr,
-                            row_idx,
-                            &perm_ro[a..=b],
-                            cfg.max_sub,
-                            &mut local,
-                            &mut touched,
-                            &mut verts,
-                        ) {
-                            continue;
-                        }
-                        let m = verts.len();
-
-                        // Induced adjacency over S u boundary, as bitsets.
-                        let w = m.div_ceil(64);
-                        let mut adj0 = vec![0u64; m * w];
-                        for (li, &v) in verts.iter().enumerate() {
-                            for &u in &row_idx[col_ptr[v]..col_ptr[v + 1]] {
-                                if u >= n {
-                                    continue;
-                                }
-                                let lu = local[u];
-                                if lu == u32::MAX || lu as usize == li {
-                                    continue;
-                                }
-                                let lu = lu as usize;
-                                adj0[li * w + (lu >> 6)] |= 1u64 << (lu & 63);
-                                adj0[lu * w + (li >> 6)] |= 1u64 << (li & 63);
-                            }
-                        }
-
-                        // The block's exact contribution to the global objective.
-                        let seed_flops: u64 = counts[a..=b]
-                            .iter()
-                            .map(|&c| {
-                                let c = c as u64;
-                                c * c
-                            })
-                            .sum();
-                        let seed: Vec<usize> = (0..ssz).collect();
-                        let mut best: Option<(Vec<usize>, u64)> = None;
-                        let first_stream =
-                            usize::from(split_ranked_streams && block_rank >= 32);
-                        for k in first_stream..cfg.streams.max(1) {
-                            // Keep the same two searches and uniform-prefix
-                            // stream-1 policy, but use PEP's promoted second
-                            // seed to sample an independent subtree basin.
-                            let mut rng_seed = if n >= 10_000 && k == 1 {
-                                0xD1B5_4A32_D192_ED03
-                            } else {
-                                stream_rng(k)
-                            };
-                            // Round two otherwise repeats byte-for-byte on an
-                            // unchanged block. D1 is diversified everywhere;
-                            // diversify stream 0 on alternating top-32 ranks,
-                            // retaining the promoted trajectory on the other
-                            // half. No trajectories or work are added.
-                            if n >= 10_000 && k == 1 && cfg.round == 1 {
-                                rng_seed ^= 0xA076_1D64_78BD_642F;
-                            }
-                            if n >= 10_000
-                                && k == 0
-                                && cfg.round == 1
-                                && block_rank & 1 == 1
-                            {
-                                rng_seed ^= 0xE703_7ED1_A0B4_28DB;
-                            }
-                            let r = search_with_nelim(
-                                m,
-                                &adj0,
-                                ssz,
-                                &seed,
-                                seed_flops,
-                                cfg.budget,
-                                rng_seed,
-                                stream_params(k),
-                            );
-                            if let Some((o, f)) = r {
-                                if best.as_ref().is_none_or(|(_, bf)| f < *bf) {
-                                    best = Some((o, f));
-                                }
-                            }
-                        }
-                        if let Some((ord, _)) = best {
-                            if ord.len() == ssz {
-                                got.push((a, ord.iter().map(|&li| verts[li]).collect()));
-                            }
-                        }
-                    }
-                    got
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_default())
-            .collect()
-    });
-
+    // ── search candidate blocks with early exit ────────────────────────────
+    // Evaluate candidate blocks in order. If 3 consecutive candidate blocks
+    // yield zero flop reduction, exit early.
+    let mut local: Vec<u32> = vec![u32::MAX; n];
+    let mut touched: Vec<usize> = Vec::new();
+    let mut verts: Vec<usize> = Vec::new();
+    let mut consecutive_zero_reduction = 0usize;
     let mut improved = 0usize;
-    for part in parts {
-        for (a, ord) in part {
-            perm[a..a + ord.len()].copy_from_slice(&ord);
+
+    for (block_rank, &(a, b)) in blocks.iter().enumerate() {
+        let ssz = b + 1 - a;
+        if !collect_subtree_vertices(
+            col_ptr,
+            row_idx,
+            &perm[a..=b],
+            cfg.max_sub,
+            &mut local,
+            &mut touched,
+            &mut verts,
+        ) {
+            consecutive_zero_reduction += 1;
+            if consecutive_zero_reduction >= 3 {
+                break;
+            }
+            continue;
+        }
+        let m = verts.len();
+        if m > cfg.max_sub || m > MAX_N {
+            consecutive_zero_reduction += 1;
+            if consecutive_zero_reduction >= 3 {
+                break;
+            }
+            continue;
+        }
+
+        // Induced adjacency over S u boundary, as bitsets.
+        let w = m.div_ceil(64);
+        let mut adj0 = vec![0u64; m * w];
+        for (li, &v) in verts.iter().enumerate() {
+            for &u in &row_idx[col_ptr[v]..col_ptr[v + 1]] {
+                if u >= n {
+                    continue;
+                }
+                let lu = local[u];
+                if lu == u32::MAX || lu as usize == li {
+                    continue;
+                }
+                let lu = lu as usize;
+                adj0[li * w + (lu >> 6)] |= 1u64 << (lu & 63);
+                adj0[lu * w + (li >> 6)] |= 1u64 << (li & 63);
+            }
+        }
+
+        // The block's exact contribution to the global objective.
+        let seed_flops: u64 = counts[a..=b]
+            .iter()
+            .map(|&c| {
+                let c = c as u64;
+                c * c
+            })
+            .sum();
+        let seed: Vec<usize> = (0..ssz).collect();
+        let mut best: Option<(Vec<usize>, u64)> = None;
+        let first_stream =
+            usize::from(split_ranked_streams && block_rank >= 32);
+        for k in first_stream..cfg.streams.max(1) {
+            // Keep the same two searches and uniform-prefix
+            // stream-1 policy, but use PEP's promoted second
+            // seed to sample an independent subtree basin.
+            let mut rng_seed = if n >= 10_000 && k == 1 {
+                0xD1B5_4A32_D192_ED03
+            } else {
+                stream_rng(k)
+            };
+            // Round two otherwise repeats byte-for-byte on an
+            // unchanged block. D1 is diversified everywhere;
+            // diversify stream 0 on alternating top-32 ranks,
+            // retaining the promoted trajectory on the other
+            // half. No trajectories or work are added.
+            if n >= 10_000 && k == 1 && cfg.round == 1 {
+                rng_seed ^= 0xA076_1D64_78BD_642F;
+            }
+            if n >= 10_000
+                && k == 0
+                && cfg.round == 1
+                && block_rank & 1 == 1
+            {
+                rng_seed ^= 0xE703_7ED1_A0B4_28DB;
+            }
+
+            let r = search_with_nelim(
+                m,
+                &adj0,
+                ssz,
+                &seed,
+                seed_flops,
+                cfg.budget,
+                rng_seed,
+                stream_params(k),
+            );
+            if let Some((o, f)) = r {
+                if best.as_ref().is_none_or(|(_, bf)| f < *bf) {
+                    best = Some((o, f));
+                }
+            }
+        }
+
+        let flop_reduction = match best.as_ref() {
+            Some((ord, f)) if ord.len() == ssz => seed_flops.saturating_sub(*f),
+            _ => 0,
+        };
+
+        if flop_reduction > 0 {
+            let (ord, _) = best.unwrap();
+            let new_ord: Vec<usize> = ord.iter().map(|&li| verts[li]).collect();
+            perm[a..a + ssz].copy_from_slice(&new_ord);
             improved += 1;
+            consecutive_zero_reduction = 0;
+        } else {
+            consecutive_zero_reduction += 1;
+            if consecutive_zero_reduction >= 3 {
+                break;
+            }
         }
     }
     improved
@@ -2472,8 +2466,7 @@ pub(crate) struct SubCfg {
     pub(crate) max_blocks: usize,
     /// Per-stream word-op budget for ONE block.
     pub(crate) budget: i64,
-    /// Streams per block (sequential here; the caller parallelises over
-    /// blocks, which is the coarser and cheaper axis).
+    /// Streams per block.
     pub(crate) streams: usize,
     /// Select blocks by exact incumbent objective contribution divided by
     /// subtree size to the three-quarter power.
@@ -2580,6 +2573,45 @@ mod subtree_preparation_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn subtree_refine_early_exit_on_three_consecutive_zero_reductions() {
+        // Build 6 disjoint 4-cliques (n = 24).
+        let mut edges = Vec::new();
+        for b in 0..6 {
+            let base = b * 4;
+            for i in 0..4 {
+                for j in (i + 1)..4 {
+                    edges.push((base + i, base + j));
+                }
+            }
+        }
+        let pat = Pattern::from_edges(24, &edges);
+        let mut perm: Vec<usize> = (0..24).collect();
+        let counts: Vec<u32> = (0..6).flat_map(|_| [4u32, 3, 2, 1]).collect();
+        let mut parent = vec![-1i32; 24];
+        for b in 0..6 {
+            let base = b * 4;
+            parent[base] = (base + 1) as i32;
+            parent[base + 1] = (base + 2) as i32;
+            parent[base + 2] = (base + 3) as i32;
+            parent[base + 3] = -1;
+        }
+        let cfg = SubCfg {
+            min_s: 4,
+            max_s: 4,
+            max_sub: 10,
+            max_blocks: 6,
+            budget: 10_000,
+            streams: 1,
+            rank_blocks: false,
+            round: 0,
+        };
+        // Cliques cannot be improved (all permutations yield the exact same elimination cost).
+        // Each candidate block yields zero flop reduction, so early exit triggers after 3 consecutive.
+        let improved = subtree_refine(24, &pat.col_ptr, &pat.row_idx, &mut perm, &counts, &parent, cfg);
+        assert_eq!(improved, 0);
     }
 }
 
