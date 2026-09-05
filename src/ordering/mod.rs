@@ -1260,8 +1260,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -1381,18 +1381,18 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 (100_000_000, 0x27BB_2EE6_87B0_B0FD),
                 (100_000_000, 0xA076_1D64_78BD_642F),
                 (50_000_000, 0x45A1_89C3_F208_7314),
-                (50_000_000, 0xD1B5_4A32_D192_ED03),
+                (50_000_000, 0x8542_598D_C3B2_1145),
             ]
         } else if best_flops < amd_flops && n <= 3_000 && nnz <= 18_000 {
             &[
                 (100_000_000i64, 0xD1B5_4A32_D192_ED03u64),
-                (50_000_000, 0xD1B5_4A32_D192_ED03),
+                (50_000_000, 0x8542_598D_C3B2_1145),
                 (50_000_000, 0x27BB_2EE6_87B0_B0FD),
             ]
         } else {
             &[
                 (100_000_000i64, 0xD1B5_4A32_D192_ED03u64),
-                (50_000_000, 0xD1B5_4A32_D192_ED03),
+                (50_000_000, 0x8542_598D_C3B2_1145),
             ]
         };
         for &(budget, seed) in budgets {
