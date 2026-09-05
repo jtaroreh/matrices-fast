@@ -818,8 +818,22 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = if par.accept_num > 0 && best < u64::MAX {
+            let phase_b_total = (budget.saturating_sub(phase_a_end)).max(1);
+            let phase_b_done = g.ops.saturating_sub(phase_a_end);
+            let progress = (phase_b_done as f64 / phase_b_total as f64).clamp(0.0, 1.0);
+            let decay = (-5.0 * progress).exp();
+            let init_slack = (best as f64 / par.accept_den.max(1) as f64) * par.accept_num as f64;
+            let slack = if progress >= 1.0 {
+                0
+            } else {
+                (init_slack * decay) as u64
+            };
+            best.saturating_add(slack)
+        } else {
+            best
+        };
+        let bound = thresh.max(cur_f[wi]).saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -1263,6 +1277,35 @@ mod atomic_budget_tests {
         let seed: Vec<_> = (0..n).collect();
         for budget in [0, 1, 32] {
             assert!(search(n, &pat.col_ptr, &pat.row_idx, &seed, u64::MAX, budget, 7).is_none());
+        }
+    }
+
+    #[test]
+    fn exponential_cooling_acceptance_threshold_runs_monotonically() {
+        let n = 32;
+        let pat = fixture(n);
+        let adj = Game::build_adj(n, &pat.col_ptr, &pat.row_idx).unwrap();
+        let seed: Vec<_> = (0..n).collect();
+        let scoring = ScoringPattern {
+            n,
+            col_ptr: pat.col_ptr.clone(),
+            row_idx: pat.row_idx.clone(),
+        };
+        let seed_flops = flops_of(&scoring, &seed);
+        let mut par = Params::DEFAULT;
+        par.accept_num = 5;
+        par.accept_den = 100;
+        par.lns = true;
+
+        let res1 = search_with_nelim(n, &adj, n, &seed, seed_flops, 200_000, 42, par);
+        let res2 = search_with_nelim(n, &adj, n, &seed, seed_flops, 200_000, 42, par);
+        assert_eq!(res1, res2, "cooling search must be strictly deterministic");
+        if let Some((ord, flops)) = res1 {
+            assert!(flops < seed_flops, "result must strictly improve seed flops");
+            let mut sorted = ord.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..n).collect::<Vec<_>>());
+            assert_eq!(flops, flops_of(&scoring, &ord));
         }
     }
 }
