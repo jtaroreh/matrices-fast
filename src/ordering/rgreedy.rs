@@ -106,6 +106,232 @@ fn below(s: &mut u64, m: u32) -> u32 {
     ((xs64(s) >> 32) * (m as u64) >> 32) as u32
 }
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
+/// 4-lane 64-bit vector type for portable SIMD bitset operations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C, align(32))]
+pub(crate) struct u64x4(pub [u64; 4]);
+
+impl u64x4 {
+    #[inline(always)]
+    pub(crate) const fn new(a: u64, b: u64, c: u64, d: u64) -> Self {
+        Self([a, b, c, d])
+    }
+
+    #[inline(always)]
+    pub(crate) fn from_slice(slice: &[u64]) -> Self {
+        debug_assert!(slice.len() >= 4);
+        Self([slice[0], slice[1], slice[2], slice[3]])
+    }
+
+    #[inline(always)]
+    pub(crate) fn copy_to_slice(self, slice: &mut [u64]) {
+        debug_assert!(slice.len() >= 4);
+        slice[0] = self.0[0];
+        slice[1] = self.0[1];
+        slice[2] = self.0[2];
+        slice[3] = self.0[3];
+    }
+
+    /// Bitset intersection: `self & other`.
+    #[inline(always)]
+    pub(crate) fn and(self, other: Self) -> Self {
+        Self([
+            self.0[0] & other.0[0],
+            self.0[1] & other.0[1],
+            self.0[2] & other.0[2],
+            self.0[3] & other.0[3],
+        ])
+    }
+
+    /// Bitset intersection with complement: `self & !other`.
+    #[inline(always)]
+    pub(crate) fn andnot(self, other: Self) -> Self {
+        Self([
+            self.0[0] & !other.0[0],
+            self.0[1] & !other.0[1],
+            self.0[2] & !other.0[2],
+            self.0[3] & !other.0[3],
+        ])
+    }
+
+    /// Bitset union: `self | other`.
+    #[inline(always)]
+    pub(crate) fn or(self, other: Self) -> Self {
+        Self([
+            self.0[0] | other.0[0],
+            self.0[1] | other.0[1],
+            self.0[2] | other.0[2],
+            self.0[3] | other.0[3],
+        ])
+    }
+
+    /// Population count across all four 64-bit lanes.
+    #[inline(always)]
+    pub(crate) fn count_ones(self) -> u32 {
+        self.0[0].count_ones()
+            + self.0[1].count_ones()
+            + self.0[2].count_ones()
+            + self.0[3].count_ones()
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn andnot_popcount_avx2(tmp: &[u64], adj: &[u64]) -> u32 {
+    let len = tmp.len().min(adj.len());
+    let chunks = len / 4;
+    let mut total = 0u32;
+    let tmp_ptr = tmp.as_ptr();
+    let adj_ptr = adj.as_ptr();
+
+    for i in 0..chunks {
+        let t = _mm256_loadu_si256(tmp_ptr.add(i * 4) as *const __m256i);
+        let a = _mm256_loadu_si256(adj_ptr.add(i * 4) as *const __m256i);
+        let diff = _mm256_andnot_si256(a, t);
+        let arr: [u64; 4] = std::mem::transmute(diff);
+        total += arr[0].count_ones() + arr[1].count_ones() + arr[2].count_ones() + arr[3].count_ones();
+    }
+    for q in (chunks * 4)..len {
+        total += (*tmp_ptr.add(q) & !*adj_ptr.add(q)).count_ones();
+    }
+    total
+}
+
+#[inline(always)]
+pub(crate) fn andnot_popcount_portable(tmp: &[u64], adj: &[u64]) -> u32 {
+    let len = tmp.len().min(adj.len());
+    let chunks = len / 4;
+    let mut total = 0u32;
+    for i in 0..chunks {
+        let t = u64x4::from_slice(&tmp[i * 4..]);
+        let a = u64x4::from_slice(&adj[i * 4..]);
+        total += t.andnot(a).count_ones();
+    }
+    for q in (chunks * 4)..len {
+        total += (tmp[q] & !adj[q]).count_ones();
+    }
+    total
+}
+
+#[inline]
+pub(crate) fn bitset_andnot_popcount(tmp: &[u64], adj: &[u64]) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { andnot_popcount_avx2(tmp, adj) };
+        }
+    }
+    andnot_popcount_portable(tmp, adj)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn and_popcount_avx2(a: &[u64], b: &[u64]) -> u32 {
+    let len = a.len().min(b.len());
+    let chunks = len / 4;
+    let mut total = 0u32;
+    let a_ptr = a.as_ptr();
+    let b_ptr = b.as_ptr();
+
+    for i in 0..chunks {
+        let va = _mm256_loadu_si256(a_ptr.add(i * 4) as *const __m256i);
+        let vb = _mm256_loadu_si256(b_ptr.add(i * 4) as *const __m256i);
+        let inter = _mm256_and_si256(va, vb);
+        let arr: [u64; 4] = std::mem::transmute(inter);
+        total += arr[0].count_ones() + arr[1].count_ones() + arr[2].count_ones() + arr[3].count_ones();
+    }
+    for q in (chunks * 4)..len {
+        total += (*a_ptr.add(q) & *b_ptr.add(q)).count_ones();
+    }
+    total
+}
+
+#[inline(always)]
+pub(crate) fn and_popcount_portable(a: &[u64], b: &[u64]) -> u32 {
+    let len = a.len().min(b.len());
+    let chunks = len / 4;
+    let mut total = 0u32;
+    for i in 0..chunks {
+        let va = u64x4::from_slice(&a[i * 4..]);
+        let vb = u64x4::from_slice(&b[i * 4..]);
+        total += va.and(vb).count_ones();
+    }
+    for q in (chunks * 4)..len {
+        total += (a[q] & b[q]).count_ones();
+    }
+    total
+}
+
+#[inline]
+pub(crate) fn bitset_and_popcount(a: &[u64], b: &[u64]) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { and_popcount_avx2(a, b) };
+        }
+    }
+    and_popcount_portable(a, b)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn or_store_popcount_avx2(adj: &mut [u64], tmp: &[u64]) -> u32 {
+    let len = adj.len().min(tmp.len());
+    let chunks = len / 4;
+    let mut total = 0u32;
+    let adj_ptr = adj.as_mut_ptr();
+    let tmp_ptr = tmp.as_ptr();
+
+    for i in 0..chunks {
+        let a = _mm256_loadu_si256(adj_ptr.add(i * 4) as *const __m256i);
+        let t = _mm256_loadu_si256(tmp_ptr.add(i * 4) as *const __m256i);
+        let nv = _mm256_or_si256(a, t);
+        _mm256_storeu_si256(adj_ptr.add(i * 4) as *mut __m256i, nv);
+        let arr: [u64; 4] = std::mem::transmute(nv);
+        total += arr[0].count_ones() + arr[1].count_ones() + arr[2].count_ones() + arr[3].count_ones();
+    }
+    for q in (chunks * 4)..len {
+        let nv = *adj_ptr.add(q) | *tmp_ptr.add(q);
+        *adj_ptr.add(q) = nv;
+        total += nv.count_ones();
+    }
+    total
+}
+
+#[inline(always)]
+pub(crate) fn or_store_popcount_portable(adj: &mut [u64], tmp: &[u64]) -> u32 {
+    let len = adj.len().min(tmp.len());
+    let chunks = len / 4;
+    let mut total = 0u32;
+    for i in 0..chunks {
+        let a = u64x4::from_slice(&adj[i * 4..]);
+        let t = u64x4::from_slice(&tmp[i * 4..]);
+        let nv = a.or(t);
+        nv.copy_to_slice(&mut adj[i * 4..]);
+        total += nv.count_ones();
+    }
+    for q in (chunks * 4)..len {
+        let nv = adj[q] | tmp[q];
+        adj[q] = nv;
+        total += nv.count_ones();
+    }
+    total
+}
+
+#[inline]
+pub(crate) fn bitset_or_store_popcount(adj: &mut [u64], tmp: &[u64]) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { or_store_popcount_avx2(adj, tmp) };
+        }
+    }
+    or_store_popcount_portable(adj, tmp)
+}
+
 /// The elimination game on a bitset fill graph.
 ///
 /// Invariant: `adj[u]` holds exactly `u`'s neighbours in the CURRENT fill graph
@@ -333,12 +559,7 @@ impl<'a> Game<'a> {
         for i in 0..self.nlist.len() {
             let u = self.nlist[i] as usize;
             let base = u * w;
-            let mut d = 0u32;
-            for k in 0..w {
-                let nv = self.adj[base + k] | self.tmp[k];
-                self.adj[base + k] = nv;
-                d += nv.count_ones();
-            }
+            let d = bitset_or_store_popcount(&mut self.adj[base..base + w], &self.tmp[..w]);
             // `tmp` contains u (u ∈ N(v)) and `adj[u]` contained v; both are
             // now set and both must go — hence the `-2`.
             self.adj[base + (u >> 6)] &= !(1u64 << (u & 63));
@@ -386,10 +607,7 @@ impl<'a> Game<'a> {
                 word &= word - 1;
                 let u = k * 64 + b;
                 let base = u * w;
-                let mut m = 0u32;
-                for q in 0..w {
-                    m += (self.tmp[q] & !self.adj[base + q]).count_ones();
-                }
+                let m = bitset_andnot_popcount(&self.tmp[..w], &self.adj[base..base + w]);
                 // `u` itself is in `tmp` and never in `adj[u]`.
                 missing += m - 1;
             }
@@ -818,8 +1036,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add((best / par.accept_den).saturating_mul(par.accept_num));
+        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] }.saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -3545,6 +3763,88 @@ mod five_window_tests {
                 if let Some(candidate) = first {
                     assert!(is_bijection(&candidate, n));
                     assert!(canonical(&pat, &candidate) < before);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod simd_bitset_tests {
+    use super::*;
+
+    #[test]
+    fn u64x4_operations_match_scalar_definitions() {
+        let a = u64x4::new(0x1234_5678_9ABC_DEF0, 0x00FF_00FF_00FF_00FF, 0, u64::MAX);
+        let b = u64x4::new(0x0FED_CBA9_8765_4321, 0x0F0F_0F0F_0F0F_0F0F, u64::MAX, 0);
+
+        let and_res = a.and(b);
+        for i in 0..4 {
+            assert_eq!(and_res.0[i], a.0[i] & b.0[i]);
+        }
+
+        let andnot_res = a.andnot(b);
+        for i in 0..4 {
+            assert_eq!(andnot_res.0[i], a.0[i] & !b.0[i]);
+        }
+
+        let or_res = a.or(b);
+        for i in 0..4 {
+            assert_eq!(or_res.0[i], a.0[i] | b.0[i]);
+        }
+
+        let expected_popcount: u32 = a.0.iter().map(|w| w.count_ones()).sum();
+        assert_eq!(a.count_ones(), expected_popcount);
+    }
+
+    #[test]
+    fn bitset_simd_matches_scalar_oracle_on_random_inputs() {
+        let mut rng = 0x9E37_79B9_7F4A_7C15;
+        for w in [0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 25, 32, 63, 64, 65] {
+            let tmp: Vec<u64> = (0..w).map(|_| xs64(&mut rng)).collect();
+            let adj: Vec<u64> = (0..w).map(|_| xs64(&mut rng)).collect();
+
+            // 1. Intersection with complement (& !)
+            let expected_andnot: u32 = tmp.iter().zip(&adj).map(|(&t, &a)| (t & !a).count_ones()).sum();
+            assert_eq!(bitset_andnot_popcount(&tmp, &adj), expected_andnot);
+            assert_eq!(andnot_popcount_portable(&tmp, &adj), expected_andnot);
+            #[cfg(target_arch = "x86_64")]
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    assert_eq!(andnot_popcount_avx2(&tmp, &adj), expected_andnot);
+                }
+            }
+
+            // 2. Intersection (&)
+            let expected_and: u32 = tmp.iter().zip(&adj).map(|(&t, &a)| (t & a).count_ones()).sum();
+            assert_eq!(bitset_and_popcount(&tmp, &adj), expected_and);
+            assert_eq!(and_popcount_portable(&tmp, &adj), expected_and);
+            #[cfg(target_arch = "x86_64")]
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    assert_eq!(and_popcount_avx2(&tmp, &adj), expected_and);
+                }
+            }
+
+            // 3. Union with store (|)
+            let expected_or: u32 = tmp.iter().zip(&adj).map(|(&t, &a)| (t | a).count_ones()).sum();
+            let mut adj_port = adj.clone();
+            let mut adj_actual = adj.clone();
+            let p_res = or_store_popcount_portable(&mut adj_port, &tmp);
+            let a_res = bitset_or_store_popcount(&mut adj_actual, &tmp);
+            assert_eq!(p_res, expected_or);
+            assert_eq!(a_res, expected_or);
+            assert_eq!(adj_port, adj_actual);
+            for i in 0..w {
+                assert_eq!(adj_actual[i], adj[i] | tmp[i]);
+            }
+            #[cfg(target_arch = "x86_64")]
+            if is_x86_feature_detected!("avx2") {
+                let mut adj_avx = adj.clone();
+                unsafe {
+                    let avx_res = or_store_popcount_avx2(&mut adj_avx, &tmp);
+                    assert_eq!(avx_res, expected_or);
+                    assert_eq!(adj_avx, adj_actual);
                 }
             }
         }
