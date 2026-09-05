@@ -505,7 +505,51 @@ impl Game<'_> {
             }
             let cut = (dmin + pol.slack as usize).min(self.n - 1);
             let pick;
-            if pol.slack == 0 && !pol.fill_tb {
+            if out.len() % 8 == 0 {
+                self.cand.clear();
+                if self.use_buckets {
+                    let mut x = self.bhead[dmin];
+                    while x >= 0 {
+                        self.cand.push(x as u32);
+                        x = self.bnext[x as usize];
+                    }
+                    self.ops += self.cand.len() as i64 * 2 + 4;
+                } else {
+                    for i in 0..self.nlive {
+                        let v = self.livelist[i];
+                        if self.deg[v as usize] as usize == dmin {
+                            self.cand.push(v);
+                        }
+                    }
+                }
+                if self.cand.len() > 1 {
+                    let cands = std::mem::take(&mut self.cand);
+                    let mut bestdef = u32::MAX;
+                    let mut cnt = 0u32;
+                    let mut sel = cands[0];
+                    for &v in &cands {
+                        let cost = (self.deg[v as usize] as usize + 1) * (2 * self.w + 4);
+                        if !self.fits_ops(cost, hard_cap) {
+                            return None;
+                        }
+                        let d = self.deficiency(v as usize);
+                        if d < bestdef {
+                            bestdef = d;
+                            cnt = 1;
+                            sel = v;
+                        } else if d == bestdef {
+                            cnt += 1;
+                            if below(rng, cnt) == 0 {
+                                sel = v;
+                            }
+                        }
+                    }
+                    self.cand = cands;
+                    pick = sel as usize;
+                } else {
+                    pick = self.cand[0] as usize;
+                }
+            } else if pol.slack == 0 && !pol.fill_tb {
                 // Uniform over the argmin bucket, via reservoir sampling (no
                 // allocation, no index bias, and no dependence on the list's
                 // internal order beyond the sampling itself).
@@ -818,8 +862,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add(best / par.accept_den * par.accept_num);
+        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] }.saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
