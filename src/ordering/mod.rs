@@ -409,6 +409,33 @@ const MID_BUDGET: i64 = 2_000_000;
 const LARGE_BLOCKS: usize = 16;
 const LARGE_BUDGET: i64 = 2_000_000;
 
+pub(crate) const DEEP_SUBTREE_BLOCKS: usize = 16;
+pub(crate) const DEEP_SUBTREE_BUDGET: i64 = 32_000_000;
+pub(crate) const DEEP_SUBTREE_WORK_CAP: i64 = (DEEP_SUBTREE_BLOCKS as i64) * DEEP_SUBTREE_BUDGET;
+
+/// Computes the elimination tree height in O(n) bottom-up order from postordered parent pointers.
+pub(crate) fn elimination_tree_height(parent: &[i32]) -> usize {
+    let n = parent.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut h = vec![1usize; n];
+    let mut max_h = 0;
+    for j in 0..n {
+        let p = parent[j];
+        if p >= 0 && (p as usize) < n {
+            let pu = p as usize;
+            if h[j] + 1 > h[pu] {
+                h[pu] = h[j] + 1;
+            }
+        }
+        if h[j] > max_h {
+            max_h = h[j];
+        }
+    }
+    max_h
+}
+
 /// Per-matrix base config for one chain round. On a short elimination tree the
 /// default `min_s = 32` admits almost no blocks, so drop the block floor to 16
 /// below `n = 1_000` — the same floor the terminal deep pass already uses.
@@ -1260,8 +1287,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -1434,6 +1461,9 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         }
     }
 
+    let mut work_spent: i64 = 0;
+    let mut work_cap: i64 = i64::MAX;
+
     // Search bounded, disjoint blocks of the incumbent elimination tree. An
     // etree postorder makes each subtree contiguous. The exact local search is
     // capped at 32 blocks and one fixed 1M-operation stream per block, for a
@@ -1457,7 +1487,21 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             .iter()
             .map(|p| p.map_or(-1, |j| j as i32))
             .collect();
+
+        let tree_height = elimination_tree_height(&parent);
+        let is_deep_etree = n >= 10_000 && (tree_height as f64 > 0.25 * n as f64);
+        if is_deep_etree {
+            work_cap = DEEP_SUBTREE_WORK_CAP;
+        }
+
         let mut cfg1 = subtree_cfg_for(n, nnz);
+        if is_deep_etree {
+            cfg1.max_blocks = DEEP_SUBTREE_BLOCKS;
+            cfg1.budget = DEEP_SUBTREE_BUDGET;
+        }
+        let req1 = (cfg1.max_blocks as i64) * cfg1.budget * (cfg1.streams.max(1) as i64);
+        work_spent += req1;
+
         let mut improved = rgreedy::subtree_refine(
             n,
             &pattern.col_ptr,
@@ -1477,6 +1521,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             && best_flops < amd_flops
             && n <= 80_000
             && nnz <= 250_000
+            && work_spent < work_cap
         {
             cfg1.round = 1;
             if n < 1_000 {
@@ -1487,15 +1532,19 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             } else {
                 cfg1.max_s = 512;
             }
-            improved = rgreedy::subtree_refine(
-                n,
-                &pattern.col_ptr,
-                &pattern.row_idx,
-                &mut candidate,
-                &counts,
-                &parent,
-                cfg1,
-            );
+            let req_retry = (cfg1.max_blocks as i64) * cfg1.budget * (cfg1.streams.max(1) as i64);
+            if work_spent + req_retry <= work_cap {
+                work_spent += req_retry;
+                improved = rgreedy::subtree_refine(
+                    n,
+                    &pattern.col_ptr,
+                    &pattern.row_idx,
+                    &mut candidate,
+                    &counts,
+                    &parent,
+                    cfg1,
+                );
+            }
         }
         if improved > 0 && is_bijection(&candidate, n) {
             let f = flops_of(&scoring_pat, &candidate);
@@ -1506,199 +1555,221 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 // Round 2: Refine the newly improved incumbent's elimination tree.
                 // Uses round = 1 to activate diversified search seeds across blocks.
                 // Bounded at 24 blocks and 1M ops per block, strictly monotonic.
-                let permuted2 = permute_pattern(&scoring_pat, &best_perm);
-                let etree2 = EliminationTree::from_pattern(&permuted2);
-                let post2 = etree2.postorder();
-                let mut candidate2: Vec<usize> = post2.iter().map(|&j| best_perm[j]).collect();
+                if work_spent < work_cap {
+                    let permuted2 = permute_pattern(&scoring_pat, &best_perm);
+                    let etree2 = EliminationTree::from_pattern(&permuted2);
+                    let post2 = etree2.postorder();
+                    let mut candidate2: Vec<usize> = post2.iter().map(|&j| best_perm[j]).collect();
 
-                let post_pattern2 = permute_pattern(&scoring_pat, &candidate2);
-                let post_etree2 = EliminationTree::from_pattern(&post_pattern2);
-                let counts2: Vec<u32> = column_counts_gnp(&post_pattern2, &post_etree2)
-                    .into_iter()
-                    .map(|c| c as u32)
-                    .collect();
-                let parent2: Vec<i32> = post_etree2
-                    .parent
-                    .iter()
-                    .map(|p| p.map_or(-1, |j| j as i32))
-                    .collect();
-                let mut cfg2 = subtree_cfg_for(n, nnz);
-                cfg2.round = 1;
-                cfg2.max_blocks = 32;
-                cfg2.min_s = 16;
-                cfg2.budget = 8_000_000;
-                // Wider round-2 window only on below-anchor medium graphs.
-                // Raising lt_1k / gt_10k max_s here regresses those buckets
-                // (0055; this session's full-width trial scored 0.843829).
-                if best_flops < amd_flops && (1_000..10_000).contains(&n) {
-                    cfg2.max_s = 256;
-                }
-                let improved2 = rgreedy::subtree_refine(
-
-                    n,
-                    &pattern.col_ptr,
-                    &pattern.row_idx,
-                    &mut candidate2,
-                    &counts2,
-                    &parent2,
-                    cfg2,
-                );
-                if improved2 > 0 && is_bijection(&candidate2, n) {
-                    let f2 = flops_of(&scoring_pat, &candidate2);
-                    if f2 < best_flops {
-                        best_flops = f2;
-                        best_perm = candidate2;
-
-                        // Round 3: one more pass over the round-2 incumbent.
-                        // Round 1 is capped at 32 blocks x 1M on the ORIGINAL
-                        // gate; round 2 re-searches (round=1, 24 blocks) only
-                        // when round 1 improved. Round 3 continues the same
-                        // chain (24 -> 32 blocks here) and widens the block
-                        // window upward (min_s 16, max_s 512) so slightly
-                        // larger subtrees of the improved tree are searched.
-                        // Same 1M ops per block, so the whole phase stays a
-                        // deterministic bounded-work chain; strictly
-                        // monotonic (accepted only on fewer flops).
-                        let permuted3 = permute_pattern(&scoring_pat, &best_perm);
-                        let etree3 = EliminationTree::from_pattern(&permuted3);
-                        let post3 = etree3.postorder();
-                        let mut candidate3: Vec<usize> =
-                            post3.iter().map(|&j| best_perm[j]).collect();
-
-                        let post_pattern3 = permute_pattern(&scoring_pat, &candidate3);
-                        let post_etree3 = EliminationTree::from_pattern(&post_pattern3);
-                        let counts3: Vec<u32> = column_counts_gnp(&post_pattern3, &post_etree3)
-                            .into_iter()
-                            .map(|c| c as u32)
-                            .collect();
-                        let parent3: Vec<i32> = post_etree3
-                            .parent
-                            .iter()
-                            .map(|p| p.map_or(-1, |j| j as i32))
-                            .collect();
-                        let mut cfg3 = subtree_cfg_for(n, nnz);
-                        cfg3.round = 1;
-                        cfg3.max_blocks = 32;
-                        cfg3.min_s = 16;
-                        cfg3.max_s = 512;
-                        cfg3.budget = 8_000_000;
-                        let improved3 = rgreedy::subtree_refine(
+                    let post_pattern2 = permute_pattern(&scoring_pat, &candidate2);
+                    let post_etree2 = EliminationTree::from_pattern(&post_pattern2);
+                    let counts2: Vec<u32> = column_counts_gnp(&post_pattern2, &post_etree2)
+                        .into_iter()
+                        .map(|c| c as u32)
+                        .collect();
+                    let parent2: Vec<i32> = post_etree2
+                        .parent
+                        .iter()
+                        .map(|p| p.map_or(-1, |j| j as i32))
+                        .collect();
+                    let mut cfg2 = subtree_cfg_for(n, nnz);
+                    cfg2.round = 1;
+                    cfg2.max_blocks = 32;
+                    cfg2.min_s = 16;
+                    cfg2.budget = 8_000_000;
+                    // Wider round-2 window only on below-anchor medium graphs.
+                    // Raising lt_1k / gt_10k max_s here regresses those buckets
+                    // (0055; this session's full-width trial scored 0.843829).
+                    if best_flops < amd_flops && (1_000..10_000).contains(&n) {
+                        cfg2.max_s = 256;
+                    }
+                    let req2 = (cfg2.max_blocks as i64) * cfg2.budget * (cfg2.streams.max(1) as i64);
+                    if work_spent + req2 <= work_cap {
+                        work_spent += req2;
+                        let improved2 = rgreedy::subtree_refine(
                             n,
                             &pattern.col_ptr,
                             &pattern.row_idx,
-                            &mut candidate3,
-                            &counts3,
-                            &parent3,
-                            cfg3,
+                            &mut candidate2,
+                            &counts2,
+                            &parent2,
+                            cfg2,
                         );
-                        if improved3 > 0 && is_bijection(&candidate3, n) {
-                            let f3 = flops_of(&scoring_pat, &candidate3);
-                            if f3 < best_flops {
-                                best_flops = f3;
-                                best_perm = candidate3;
+                        if improved2 > 0 && is_bijection(&candidate2, n) {
+                            let f2 = flops_of(&scoring_pat, &candidate2);
+                            if f2 < best_flops {
+                                best_flops = f2;
+                                best_perm = candidate2;
 
-                                // Round 4: one more pass over the round-3
-                                // incumbent. Same block count as round 3 (32)
-                                // but a wider window (max_s 768), so later
-                                // rounds of the chain keep exploring larger
-                                // subtrees of each newly refined tree. Spend
-                                // 64M per block only in the measured-safe
-                                // lower-medium band; retain the hidden-proven
-                                // 32M budget everywhere else.
-                                let permuted4 = permute_pattern(&scoring_pat, &best_perm);
-                                let etree4 = EliminationTree::from_pattern(&permuted4);
-                                let post4 = etree4.postorder();
-                                let mut candidate4: Vec<usize> =
-                                    post4.iter().map(|&j| best_perm[j]).collect();
+                                // Round 3: one more pass over the round-2 incumbent.
+                                // Round 1 is capped at 32 blocks x 1M on the ORIGINAL
+                                // gate; round 2 re-searches (round=1, 24 blocks) only
+                                // when round 1 improved. Round 3 continues the same
+                                // chain (24 -> 32 blocks here) and widens the block
+                                // window upward (min_s 16, max_s 512) so slightly
+                                // larger subtrees of the improved tree are searched.
+                                // Same 1M ops per block, so the whole phase stays a
+                                // deterministic bounded-work chain; strictly
+                                // monotonic (accepted only on fewer flops).
+                                if work_spent < work_cap {
+                                    let permuted3 = permute_pattern(&scoring_pat, &best_perm);
+                                    let etree3 = EliminationTree::from_pattern(&permuted3);
+                                    let post3 = etree3.postorder();
+                                    let mut candidate3: Vec<usize> =
+                                        post3.iter().map(|&j| best_perm[j]).collect();
 
-                                let post_pattern4 = permute_pattern(&scoring_pat, &candidate4);
-                                let post_etree4 = EliminationTree::from_pattern(&post_pattern4);
-                                let counts4: Vec<u32> =
-                                    column_counts_gnp(&post_pattern4, &post_etree4)
+                                    let post_pattern3 = permute_pattern(&scoring_pat, &candidate3);
+                                    let post_etree3 = EliminationTree::from_pattern(&post_pattern3);
+                                    let counts3: Vec<u32> = column_counts_gnp(&post_pattern3, &post_etree3)
                                         .into_iter()
                                         .map(|c| c as u32)
                                         .collect();
-                                let parent4: Vec<i32> = post_etree4
-                                    .parent
-                                    .iter()
-                                    .map(|p| p.map_or(-1, |j| j as i32))
-                                    .collect();
-                                let mut cfg4 = subtree_cfg_for(n, nnz);
-                                cfg4.round = 3;
-                                cfg4.max_blocks = 32;
-                                cfg4.min_s = 16;
-                                cfg4.max_s = 768;
-                                cfg4.budget = if (1_000..6_000).contains(&n) {
-                                    64_000_000
-                                } else {
-                                    32_000_000
-                                };
-                                let improved4 = rgreedy::subtree_refine(
-                                     n,
-                                     &pattern.col_ptr,
-                                     &pattern.row_idx,
-                                     &mut candidate4,
-                                     &counts4,
-                                     &parent4,
-                                     cfg4,
-                                );
-                                if improved4 > 0 && is_bijection(&candidate4, n) {
-                                    let f4 = flops_of(&scoring_pat, &candidate4);
-                                    if f4 < best_flops {
-                                        best_flops = f4;
-                                        best_perm = candidate4;
+                                    let parent3: Vec<i32> = post_etree3
+                                        .parent
+                                        .iter()
+                                        .map(|p| p.map_or(-1, |j| j as i32))
+                                        .collect();
+                                    let mut cfg3 = subtree_cfg_for(n, nnz);
+                                    cfg3.round = 1;
+                                    cfg3.max_blocks = 32;
+                                    cfg3.min_s = 16;
+                                    cfg3.max_s = 512;
+                                    cfg3.budget = 8_000_000;
+                                    let req3 = (cfg3.max_blocks as i64) * cfg3.budget * (cfg3.streams.max(1) as i64);
+                                    if work_spent + req3 <= work_cap {
+                                        work_spent += req3;
+                                        let improved3 = rgreedy::subtree_refine(
+                                            n,
+                                            &pattern.col_ptr,
+                                            &pattern.row_idx,
+                                            &mut candidate3,
+                                            &counts3,
+                                            &parent3,
+                                            cfg3,
+                                        );
+                                        if improved3 > 0 && is_bijection(&candidate3, n) {
+                                            let f3 = flops_of(&scoring_pat, &candidate3);
+                                            if f3 < best_flops {
+                                                best_flops = f3;
+                                                best_perm = candidate3;
 
-                                        // Round 5: one more pass over the round-4
-                                        // incumbent. Same block count (32), min_s 16,
-                                        // max_s 768, round = 4 seed diversification.
-                                        let permuted5 = permute_pattern(&scoring_pat, &best_perm);
-                                        let etree5 = EliminationTree::from_pattern(&permuted5);
-                                        let post5 = etree5.postorder();
-                                        let mut candidate5: Vec<usize> =
-                                            post5.iter().map(|&j| best_perm[j]).collect();
+                                                // Round 4: one more pass over the round-3
+                                                // incumbent. Same block count as round 3 (32)
+                                                // but a wider window (max_s 768), so later
+                                                // rounds of the chain keep exploring larger
+                                                // subtrees of each newly refined tree. Spend
+                                                // 64M per block only in the measured-safe
+                                                // lower-medium band; retain the hidden-proven
+                                                // 32M budget everywhere else.
+                                                if work_spent < work_cap {
+                                                    let permuted4 = permute_pattern(&scoring_pat, &best_perm);
+                                                    let etree4 = EliminationTree::from_pattern(&permuted4);
+                                                    let post4 = etree4.postorder();
+                                                    let mut candidate4: Vec<usize> =
+                                                        post4.iter().map(|&j| best_perm[j]).collect();
 
-                                        let post_pattern5 = permute_pattern(&scoring_pat, &candidate5);
-                                        let post_etree5 = EliminationTree::from_pattern(&post_pattern5);
-                                        let counts5: Vec<u32> =
-                                            column_counts_gnp(&post_pattern5, &post_etree5)
-                                                .into_iter()
-                                                .map(|c| c as u32)
-                                                .collect();
-                                        let parent5: Vec<i32> = post_etree5
-                                            .parent
-                                            .iter()
-                                            .map(|p| p.map_or(-1, |j| j as i32))
-                                            .collect();
-                                        let mut cfg5 = subtree_cfg_for(n, nnz);
-                                        cfg5.round = 4;
-                                        if n < 100_000 || best_flops != amd_flops {
-                                            if (1_000..4_000).contains(&n) {
-                                                cfg5.max_blocks = 16;
-                                                cfg5.budget = 32_000_000;
-                                            } else {
-                                                cfg5.max_blocks = 32;
-                                                cfg5.budget = 16_000_000;
-                                            }
-                                            let improved5 = rgreedy::subtree_refine(
-                                                n,
-                                                &pattern.col_ptr,
-                                                &pattern.row_idx,
-                                                &mut candidate5,
-                                                &counts5,
-                                                &parent5,
-                                                cfg5,
-                                            );
-                                            if improved5 > 0 && is_bijection(&candidate5, n) {
-                                                let f = flops_of(&scoring_pat, &candidate5);
-                                                if f < best_flops {
-                                                    best_flops = f;
-                                                    best_perm = candidate5;
+                                                    let post_pattern4 = permute_pattern(&scoring_pat, &candidate4);
+                                                    let post_etree4 = EliminationTree::from_pattern(&post_pattern4);
+                                                    let counts4: Vec<u32> =
+                                                        column_counts_gnp(&post_pattern4, &post_etree4)
+                                                            .into_iter()
+                                                            .map(|c| c as u32)
+                                                            .collect();
+                                                    let parent4: Vec<i32> = post_etree4
+                                                        .parent
+                                                        .iter()
+                                                        .map(|p| p.map_or(-1, |j| j as i32))
+                                                        .collect();
+                                                    let mut cfg4 = subtree_cfg_for(n, nnz);
+                                                    cfg4.round = 3;
+                                                    cfg4.max_blocks = 32;
+                                                    cfg4.min_s = 16;
+                                                    cfg4.max_s = 768;
+                                                    cfg4.budget = if (1_000..6_000).contains(&n) {
+                                                        64_000_000
+                                                    } else {
+                                                        32_000_000
+                                                    };
+                                                    let req4 = (cfg4.max_blocks as i64) * cfg4.budget * (cfg4.streams.max(1) as i64);
+                                                    if work_spent + req4 <= work_cap {
+                                                        work_spent += req4;
+                                                        let improved4 = rgreedy::subtree_refine(
+                                                             n,
+                                                             &pattern.col_ptr,
+                                                             &pattern.row_idx,
+                                                             &mut candidate4,
+                                                             &counts4,
+                                                             &parent4,
+                                                             cfg4,
+                                                        );
+                                                        if improved4 > 0 && is_bijection(&candidate4, n) {
+                                                            let f4 = flops_of(&scoring_pat, &candidate4);
+                                                            if f4 < best_flops {
+                                                                best_flops = f4;
+                                                                best_perm = candidate4;
+
+                                                                // Round 5: one more pass over the round-4
+                                                                // incumbent. Same block count (32), min_s 16,
+                                                                // max_s 768, round = 4 seed diversification.
+                                                                if work_spent < work_cap {
+                                                                    let permuted5 = permute_pattern(&scoring_pat, &best_perm);
+                                                                    let etree5 = EliminationTree::from_pattern(&permuted5);
+                                                                    let post5 = etree5.postorder();
+                                                                    let mut candidate5: Vec<usize> =
+                                                                        post5.iter().map(|&j| best_perm[j]).collect();
+
+                                                                    let post_pattern5 = permute_pattern(&scoring_pat, &candidate5);
+                                                                    let post_etree5 = EliminationTree::from_pattern(&post_pattern5);
+                                                                    let counts5: Vec<u32> =
+                                                                        column_counts_gnp(&post_pattern5, &post_etree5)
+                                                                            .into_iter()
+                                                                            .map(|c| c as u32)
+                                                                            .collect();
+                                                                    let parent5: Vec<i32> = post_etree5
+                                                                        .parent
+                                                                        .iter()
+                                                                        .map(|p| p.map_or(-1, |j| j as i32))
+                                                                        .collect();
+                                                                    let mut cfg5 = subtree_cfg_for(n, nnz);
+                                                                    cfg5.round = 4;
+                                                                    if n < 100_000 || best_flops != amd_flops {
+                                                                        if (1_000..4_000).contains(&n) {
+                                                                            cfg5.max_blocks = 16;
+                                                                            cfg5.budget = 32_000_000;
+                                                                        } else {
+                                                                            cfg5.max_blocks = 32;
+                                                                            cfg5.budget = 16_000_000;
+                                                                        }
+                                                                        let req5 = (cfg5.max_blocks as i64) * cfg5.budget * (cfg5.streams.max(1) as i64);
+                                                                        if work_spent + req5 <= work_cap {
+                                                                            work_spent += req5;
+                                                                            let improved5 = rgreedy::subtree_refine(
+                                                                                n,
+                                                                                &pattern.col_ptr,
+                                                                                &pattern.row_idx,
+                                                                                &mut candidate5,
+                                                                                &counts5,
+                                                                                &parent5,
+                                                                                cfg5,
+                                                                            );
+                                                                            if improved5 > 0 && is_bijection(&candidate5, n) {
+                                                                                let f = flops_of(&scoring_pat, &candidate5);
+                                                                                if f < best_flops {
+                                                                                    best_flops = f;
+                                                                                    best_perm = candidate5;
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
-
                             }
                         }
                     }
@@ -1711,7 +1782,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // pass. Two additive versions exceeded the hidden time cap even though the
     // second used this narrow gate. Substitution makes total work lower than
     // the promoted frontier while retaining the stronger search allocation.
-    if (SUBTREE_MIN_N..=80_000).contains(&n) && nnz <= 250_000 {
+    if (SUBTREE_MIN_N..=80_000).contains(&n) && nnz <= 250_000 && work_spent < work_cap {
         let incumbent_flops = flops_of(&scoring_pat, &best_perm);
         let permuted = permute_pattern(&scoring_pat, &best_perm);
         let etree = EliminationTree::from_pattern(&permuted);
@@ -1840,7 +1911,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // One extra ranked-subtree ticket on below-anchor small/medium graphs.
     // Large matrices are excluded: they own the local worst case, and an
     // additive pass there is what failed hidden validation in 0060.
-    if best_flops < amd_flops && n < 10_000 && nnz <= 100_000 && n >= SUBTREE_MIN_N {
+    if best_flops < amd_flops && n < 10_000 && nnz <= 100_000 && n >= SUBTREE_MIN_N && work_spent < work_cap {
         let permuted = permute_pattern(&scoring_pat, &best_perm);
         let etree = EliminationTree::from_pattern(&permuted);
         let post = etree.postorder();
@@ -3463,5 +3534,49 @@ mod tests {
 
             assert!(requested_budget <= TERMINAL_SUBTREE_SEARCH_WORK_LIMIT);
         }
+    }
+
+    #[test]
+    fn test_elimination_tree_height() {
+        assert_eq!(elimination_tree_height(&[]), 0);
+        assert_eq!(elimination_tree_height(&[-1]), 1);
+
+        // Chain of length 5: 0 -> 1 -> 2 -> 3 -> 4 -> -1
+        let chain_parent = vec![1, 2, 3, 4, -1];
+        assert_eq!(elimination_tree_height(&chain_parent), 5);
+
+        // Star graph with root 4: 0->4, 1->4, 2->4, 3->4, 4->-1
+        let star_parent = vec![4, 4, 4, 4, -1];
+        assert_eq!(elimination_tree_height(&star_parent), 2);
+
+        // Two disjoint trees: 0->1->-1 (height 2) and 2->3->4->-1 (height 3)
+        let forest_parent = vec![1, -1, 3, 4, -1];
+        assert_eq!(elimination_tree_height(&forest_parent), 3);
+    }
+
+    #[test]
+    fn test_deep_subtree_budget_and_work_cap() {
+        assert_eq!(DEEP_SUBTREE_BLOCKS, 16);
+        assert_eq!(DEEP_SUBTREE_BUDGET, 32_000_000);
+        assert_eq!(DEEP_SUBTREE_WORK_CAP, 16 * 32_000_000);
+
+        // For n >= 10,000 and height > 0.25 * n:
+        let n = 10_000;
+        let deep_height = 2_501;
+        assert!(deep_height as f64 > 0.25 * n as f64);
+
+        let mut work_spent: i64 = 0;
+        let work_cap = DEEP_SUBTREE_WORK_CAP;
+        let mut cfg1 = subtree_cfg_for(n, 50_000);
+        cfg1.max_blocks = DEEP_SUBTREE_BLOCKS;
+        cfg1.budget = DEEP_SUBTREE_BUDGET;
+
+        let req1 = (cfg1.max_blocks as i64) * cfg1.budget * (cfg1.streams.max(1) as i64);
+        assert_eq!(req1, DEEP_SUBTREE_WORK_CAP);
+        work_spent += req1;
+        assert_eq!(work_spent, work_cap);
+
+        // Strict work cap ensures no further rounds run
+        assert!(!(work_spent < work_cap));
     }
 }
