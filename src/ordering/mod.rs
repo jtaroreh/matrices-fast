@@ -1628,7 +1628,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                 cfg4.max_blocks = 32;
                                 cfg4.min_s = 16;
                                 cfg4.max_s = 768;
-                                cfg4.budget = if (1_000..6_000).contains(&n) {
+                                cfg4.budget = if (1_000..=4_000).contains(&n) && nnz <= 40_000 {
                                     64_000_000
                                 } else {
                                     32_000_000
