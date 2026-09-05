@@ -6,3 +6,11 @@
 # The log starts empty: your first run appends the first row. For the score the
 # shipped src/ordering/ reaches on the dev corpus, see
 # src/ordering/memory/index.md.
+1788600673	FAIL	NaN	NaN	failed to load hidden corpus
+1788600703	FAIL	NaN	NaN	sporttournament48: order() exceeded the 10.0s per-matrix cap and was killed (took ≥ 10.0s). Your ordering must return within 10s on every matrix. This matrix is n=1131, nnz=6676, nnz/n≈5 — if it is dense, the cost is in order() itself; gate expensive paths by BOTH n and nnz. | time_cap test: normal
+1788600720	FAIL	NaN	NaN	slay06m: order() exceeded the 10.0s per-matrix cap and was killed (took ≥ 10.0s). Your ordering must return within 10s on every matrix. This matrix is n=357, nnz=1080, nnz/n≈3 — if it is dense, the cost is in order() itself; gate expensive paths by BOTH n and nnz. | time_cap test: slow
+1788600724	OK	1.000000	1.000000	
+1788600749	FAIL	NaN	NaN	failed to load hidden corpus
+1788600750	OK	1.000000	1.000000	
+1788600961	OK	0.874557	0.958488	time_cap test: normal
+1788600973	FAIL	NaN	NaN	slay06m: order() exceeded the 10.0s per-matrix cap and was killed (took ≥ 10.0s). Your ordering must return within 10s on every matrix. This matrix is n=357, nnz=1080, nnz/n≈3 — if it is dense, the cost is in order() itself; gate expensive paths by BOTH n and nnz. | time_cap test: slow

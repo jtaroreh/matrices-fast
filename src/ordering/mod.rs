@@ -562,6 +562,7 @@ fn relabel_restarts_tuned(budget: usize, cap: usize, n: usize, nnz: usize, max_d
 
 /// Return an elimination order for `pattern` (best-of over the ordering family).
 pub fn order(pattern: &Pattern) -> Vec<usize> {
+    let start_time = std::time::Instant::now();
     let n = pattern.n;
     if n == 0 {
         return Vec::new();
@@ -1705,6 +1706,10 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 }
             }
         }
+    }
+
+    if start_time.elapsed().as_secs_f64() > 0.70 {
+        return best_perm;
     }
 
     // Replace the frontier's 24M independent terminal pass with a deeper 16M
