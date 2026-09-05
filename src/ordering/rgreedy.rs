@@ -1047,7 +1047,7 @@ pub(crate) fn adjacent_pair_descent(
     let adj0 = Game::build_adj(n, col_ptr, row_idx)?;
     let mut game = Game::new(n, &adj0)?;
     let mut cur = seed.to_vec();
-    let mut next = Vec::with_capacity(n);
+    let mut next = vec![0; n];
     let mut changed_any = false;
 
     for sweep in 0..sweeps {
@@ -1055,45 +1055,74 @@ pub(crate) fn adjacent_pair_descent(
         if game.ops > budget {
             return None;
         }
-        next.clear();
-
-        let mut k = 0usize;
-        if sweep & 1 == 1 {
-            let v = cur[0];
-            next.push(v);
-            game.eliminate(v);
-            if game.ops > budget {
-                return None;
-            }
-            k = 1;
-        }
 
         let mut changed = false;
-        while k + 1 < n {
-            let a = cur[k];
-            let b = cur[k + 1];
-            let adjacent = game.adj[a * game.w + (b >> 6)] & (1u64 << (b & 63)) != 0;
-            let swap = adjacent && game.deg[b] < game.deg[a];
-            let (first, second) = if swap { (b, a) } else { (a, b) };
-            changed |= swap;
-            next.push(first);
-            next.push(second);
-            game.eliminate(first);
-            if game.ops > budget {
-                return None;
-            }
-            game.eliminate(second);
-            if game.ops > budget {
-                return None;
-            }
-            k += 2;
-        }
-        if k < n {
-            let v = cur[k];
-            next.push(v);
+        if sweep & 1 == 1 {
+            let v = cur[0];
+            next[0] = v;
             game.eliminate(v);
             if game.ops > budget {
                 return None;
+            }
+            let mut k = 1usize;
+            while k + 1 < n {
+                let a = cur[k];
+                let b = cur[k + 1];
+                let adjacent = game.adj[a * game.w + (b >> 6)] & (1u64 << (b & 63)) != 0;
+                let swap = adjacent && game.deg[b] < game.deg[a];
+                let (first, second) = if swap { (b, a) } else { (a, b) };
+                changed |= swap;
+                next[k] = first;
+                next[k + 1] = second;
+                game.eliminate(first);
+                if game.ops > budget {
+                    return None;
+                }
+                game.eliminate(second);
+                if game.ops > budget {
+                    return None;
+                }
+                k += 2;
+            }
+            if k < n {
+                let v = cur[k];
+                next[k] = v;
+                game.eliminate(v);
+                if game.ops > budget {
+                    return None;
+                }
+            }
+        } else {
+            if n & 1 == 1 {
+                let v = cur[n - 1];
+                next[n - 1] = v;
+                game.eliminate(v);
+                if game.ops > budget {
+                    return None;
+                }
+            }
+            let mut k = (n - 2) & !1;
+            loop {
+                let a = cur[k];
+                let b = cur[k + 1];
+                let adjacent = game.adj[a * game.w + (b >> 6)] & (1u64 << (b & 63)) != 0;
+                let swap = adjacent && game.deg[b] < game.deg[a];
+                let (first, second) = if swap { (b, a) } else { (a, b) };
+                changed |= swap;
+                next[k] = first;
+                next[k + 1] = second;
+                game.eliminate(second);
+                if game.ops > budget {
+                    return None;
+                }
+                game.eliminate(first);
+                if game.ops > budget {
+                    return None;
+                }
+                if k < 2 {
+                    break;
+                }
+                k -= 2;
             }
         }
 
@@ -2743,6 +2772,52 @@ mod triple_tests {
         }
         assert!(improvements > 0);
         println!("TRIPLE_CANONICAL improving_cases={improvements}");
+    }
+
+    #[test]
+    fn pair_descent_is_deterministic_and_bijection() {
+        let mut rng = 0xEC1B_7492_D805_36AF;
+        for n in [6, 13, 67, 180, 181] {
+            let mut edges = Vec::new();
+            for v in 0..n {
+                edges.push((v, (v + 1) % n));
+                for _ in 0..3 {
+                    let u = xs64(&mut rng) as usize % n;
+                    if u != v {
+                        edges.push((v, u));
+                    }
+                }
+            }
+            let pat = Pattern::from_edges(n, &edges);
+            let mut seed: Vec<_> = (0..n).collect();
+            for i in 1..n {
+                seed.swap(i, xs64(&mut rng) as usize % (i + 1));
+            }
+            for sweeps in [1, 2, 3, 4] {
+                for budget in [0, 1, 32, 256, 10_000, 500_000] {
+                    let first = adjacent_pair_descent(
+                        n,
+                        &pat.col_ptr,
+                        &pat.row_idx,
+                        &seed,
+                        sweeps,
+                        budget,
+                    );
+                    let second = adjacent_pair_descent(
+                        n,
+                        &pat.col_ptr,
+                        &pat.row_idx,
+                        &seed,
+                        sweeps,
+                        budget,
+                    );
+                    assert_eq!(first, second, "n={n} budget={budget} sweeps={sweeps}");
+                    if let Some(got) = first {
+                        assert!(is_bijection(&got, n));
+                    }
+                }
+            }
+        }
     }
 }
 
