@@ -1497,7 +1497,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 cfg1,
             );
         }
-        if improved > 0 && is_bijection(&candidate, n) {
+        let _ = improved;
+        if flops_of(&scoring_pat, &candidate) < best_flops && is_bijection(&candidate, n) {
             let f = flops_of(&scoring_pat, &candidate);
             if f < best_flops {
                 best_flops = f;
@@ -1543,7 +1544,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                     &parent2,
                     cfg2,
                 );
-                if improved2 > 0 && is_bijection(&candidate2, n) {
+                let _ = improved2;
+                if flops_of(&scoring_pat, &candidate2) < best_flops && is_bijection(&candidate2, n) {
                     let f2 = flops_of(&scoring_pat, &candidate2);
                     if f2 < best_flops {
                         best_flops = f2;
@@ -1591,7 +1593,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                             &parent3,
                             cfg3,
                         );
-                        if improved3 > 0 && is_bijection(&candidate3, n) {
+                        let _ = improved3;
+                        if flops_of(&scoring_pat, &candidate3) < best_flops && is_bijection(&candidate3, n) {
                             let f3 = flops_of(&scoring_pat, &candidate3);
                             if f3 < best_flops {
                                 best_flops = f3;
@@ -1642,7 +1645,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                      &parent4,
                                      cfg4,
                                 );
-                                if improved4 > 0 && is_bijection(&candidate4, n) {
+                                let _ = improved4;
+                                if flops_of(&scoring_pat, &candidate4) < best_flops && is_bijection(&candidate4, n) {
                                     let f4 = flops_of(&scoring_pat, &candidate4);
                                     if f4 < best_flops {
                                         best_flops = f4;
@@ -1688,7 +1692,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                                 &parent5,
                                                 cfg5,
                                             );
-                                            if improved5 > 0 && is_bijection(&candidate5, n) {
+                                            let _ = improved5;
+                                            if flops_of(&scoring_pat, &candidate5) < best_flops && is_bijection(&candidate5, n) {
                                                 let f = flops_of(&scoring_pat, &candidate5);
                                                 if f < best_flops {
                                                     best_flops = f;
