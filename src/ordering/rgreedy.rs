@@ -2297,14 +2297,22 @@ pub(crate) fn subtree_refine(
         let mut ranked: Vec<(usize, usize, u64)> = blocks
             .drain(..)
             .map(|(a, b)| {
-                let contribution = counts[a..=b]
+                let contribution: u64 = counts[a..=b]
                     .iter()
                     .map(|&c| {
                         let c = c as u64;
                         c * c
                     })
                     .sum();
-                (a, b, contribution)
+                let root = b;
+                let p = parent[root];
+                let parent_count = if p >= 0 && (p as usize) < counts.len() {
+                    counts[p as usize] as u64
+                } else {
+                    1
+                };
+                let weighted = contribution.saturating_mul(parent_count);
+                (a, b, weighted)
             })
             .collect();
         ranked.sort_by(rank_alpha_three_quarters_cmp);
@@ -2580,6 +2588,52 @@ mod subtree_preparation_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn candidate_subtree_blocks_are_weighted_by_parent_clique_density() {
+        let n = 10;
+        let mut counts = vec![10u32; n];
+        counts[8] = 50;
+        counts[9] = 100;
+        let mut parent = vec![-1i32; n];
+        parent[0] = 1;
+        parent[1] = 2;
+        parent[2] = 3;
+        parent[3] = 8;
+        parent[4] = 5;
+        parent[5] = 6;
+        parent[6] = 7;
+        parent[7] = 9;
+        parent[8] = -1;
+        parent[9] = -1;
+
+        let blocks = vec![(0, 3), (4, 7)];
+        let mut ranked: Vec<(usize, usize, u64)> = blocks
+            .into_iter()
+            .map(|(a, b)| {
+                let contribution: u64 = counts[a..=b]
+                    .iter()
+                    .map(|&c| {
+                        let c = c as u64;
+                        c * c
+                    })
+                    .sum();
+                let root = b;
+                let p = parent[root];
+                let parent_count = if p >= 0 && (p as usize) < counts.len() {
+                    counts[p as usize] as u64
+                } else {
+                    1
+                };
+                let weighted = contribution.saturating_mul(parent_count);
+                (a, b, weighted)
+            })
+            .collect();
+        ranked.sort_by(rank_alpha_three_quarters_cmp);
+
+        assert_eq!(ranked[0].1, 7, "Block B (feeding parent count 100) must rank ahead of Block A (parent count 50)");
+        assert_eq!(ranked[1].1, 3);
     }
 }
 
