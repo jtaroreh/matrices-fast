@@ -712,7 +712,8 @@ pub(crate) fn search_with_nelim(
     rng_seed: u64,
     par: Params,
 ) -> Option<(Vec<usize>, u64)> {
-    let mut g = Game::new_partial(n, adj0, nelim)?;
+    let n_sub = if seed.is_empty() { nelim } else { seed.len().max(nelim) };
+    let mut g = Game::new_partial(n, adj0, n_sub)?;
     let mut rng = rng_seed | 1;
     let mut best = seed_flops;
     let mut best_ord: Vec<usize> = Vec::new();
@@ -793,15 +794,13 @@ pub(crate) fn search_with_nelim(
         best_ord.clone()
     };
     let nwalk = par.walks.max(1);
-    let nelim = g.nelim;
-    let _ = nelim;
+    let ne = nelim.min(g.nelim).max(1);
     let mut cur: Vec<Vec<usize>> = vec![start; nwalk];
     let mut cur_f: Vec<u64> = vec![best; nwalk];
     let mut stall = 0usize;
     let mut kick: Vec<usize> = Vec::new();
     while par.lns && g.ops + last_run <= budget {
         let before = g.ops;
-        let ne = nelim.max(1);
         let p = match par.prefix_mode {
             0 => below(&mut rng, ne as u32) as usize,
             3 => below(&mut rng, (ne as u32).div_ceil(2)) as usize,
@@ -818,8 +817,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add(best / par.accept_den * par.accept_num);
+        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] }.saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -2269,6 +2268,16 @@ pub(crate) fn subtree_refine(
             size[p as usize] += size[j];
         }
     }
+    let mut height: Vec<u32> = vec![1; n];
+    for j in 0..n {
+        let p = parent[j];
+        if p >= 0 {
+            let ph = height[j] + 1;
+            if ph > height[p as usize] {
+                height[p as usize] = ph;
+            }
+        }
+    }
 
     // ── pick disjoint blocks, topmost-eligible first ────────────────────────
     // Descending position order visits ancestors before descendants, so the
@@ -2335,6 +2344,7 @@ pub(crate) fn subtree_refine(
     let nthreads = 4.max(1).min(blocks.len());
     let perm_ro: &[usize] = perm;
     let blocks_ro: &[(usize, usize)] = &blocks;
+    let height_ro: &[u32] = &height;
     let parts: Vec<Vec<(usize, Vec<usize>)>> = std::thread::scope(|sc| {
         let handles: Vec<_> = (0..nthreads)
             .map(|t| {
@@ -2349,6 +2359,14 @@ pub(crate) fn subtree_refine(
                         let (a, b) = blocks_ro[bi];
                         bi += nthreads;
                         let ssz = b + 1 - a;
+                        let h = height_ro[b] as usize;
+                        let ssz_m1 = ssz.saturating_sub(1).max(1);
+                        let h_m1 = h.saturating_sub(1).min(ssz_m1);
+                        // Scale nelim dynamically with elimination tree height:
+                        // shallow trees retain 85% prefix, deep trees retain 65%.
+                        let retain_num = 850 - (200 * h_m1) / ssz_m1;
+                        let nelim = ((ssz as u64 * retain_num as u64) / 1000) as usize;
+                        let nelim = nelim.clamp(1, ssz);
                         if !collect_subtree_vertices(
                             col_ptr,
                             row_idx,
@@ -2419,7 +2437,7 @@ pub(crate) fn subtree_refine(
                             let r = search_with_nelim(
                                 m,
                                 &adj0,
-                                ssz,
+                                nelim,
                                 &seed,
                                 seed_flops,
                                 cfg.budget,
