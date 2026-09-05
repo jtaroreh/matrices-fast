@@ -1260,10 +1260,10 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let mut cumulative_work: u64 = 0;
 
     if pair_descent_gate {
+        cumulative_work += pair_descent_ops_budget as u64;
         if let Some(cand) = rgreedy::adjacent_pair_descent(
             n,
             &pattern.col_ptr,
@@ -1296,6 +1296,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         && nnz <= SIMPLICIAL_PROMOTION_MAX_NNZ
         && nnz <= n.saturating_mul(SIMPLICIAL_PROMOTION_MAX_DENSITY)
     {
+        cumulative_work += SIMPLICIAL_PROMOTION_OPS_BUDGET as u64;
         if let Some(cand) = rgreedy::simplicial_promotion(
             n,
             &pattern.col_ptr,
@@ -1311,10 +1312,10 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         }
     }
 
-    well_below = amd_flops > 0
+    let well_below = amd_flops > 0
         && best_flops < amd_flops
         && best_flops.saturating_mul(5) < amd_flops.saturating_mul(4);
-    medium_exact_gate = n > 1_000
+    let medium_exact_gate = n > 1_000
         && n <= 6_000
         && (nnz <= 30_000 || (well_below && nnz <= 50_000));
 
@@ -1352,6 +1353,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             ]
         };
         for &(budget, rng_seed) in small_streams {
+            cumulative_work += budget as u64;
             if let Some((cand, _)) = rgreedy::search(
                 n,
                 &pattern.col_ptr,
@@ -1396,6 +1398,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             ]
         };
         for &(budget, seed) in budgets {
+            cumulative_work += budget as u64;
             if let Some((cand, _)) = rgreedy::search(
                 n,
                 &pattern.col_ptr,
@@ -1418,6 +1421,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
 
     // On the medium exact-search gate, refine the new incumbent once more.
     if pair_descent_gate && medium_exact_gate {
+        cumulative_work += pair_descent_ops_budget as u64;
         if let Some(cand) = rgreedy::adjacent_pair_descent(
             n,
             &pattern.col_ptr,
@@ -1458,6 +1462,9 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             .map(|p| p.map_or(-1, |j| j as i32))
             .collect();
         let mut cfg1 = subtree_cfg_for(n, nnz);
+        cumulative_work += (cfg1.budget as u64)
+            * (cfg1.max_blocks as u64)
+            * (cfg1.streams.max(1) as u64);
         let mut improved = rgreedy::subtree_refine(
             n,
             &pattern.col_ptr,
@@ -1487,6 +1494,9 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             } else {
                 cfg1.max_s = 512;
             }
+            cumulative_work += (cfg1.budget as u64)
+                * (cfg1.max_blocks as u64)
+                * (cfg1.streams.max(1) as u64);
             improved = rgreedy::subtree_refine(
                 n,
                 &pattern.col_ptr,
@@ -1533,6 +1543,9 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 if best_flops < amd_flops && (1_000..10_000).contains(&n) {
                     cfg2.max_s = 256;
                 }
+                cumulative_work += (cfg2.budget as u64)
+                    * (cfg2.max_blocks as u64)
+                    * (cfg2.streams.max(1) as u64);
                 let improved2 = rgreedy::subtree_refine(
 
                     n,
@@ -1582,6 +1595,9 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                         cfg3.min_s = 16;
                         cfg3.max_s = 512;
                         cfg3.budget = 8_000_000;
+                        cumulative_work += (cfg3.budget as u64)
+                            * (cfg3.max_blocks as u64)
+                            * (cfg3.streams.max(1) as u64);
                         let improved3 = rgreedy::subtree_refine(
                             n,
                             &pattern.col_ptr,
@@ -1633,6 +1649,10 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                 } else {
                                     32_000_000
                                 };
+                                // Work-spent ceiling before Round 4: clamp Round 4 to 16 blocks if cumulative work exceeds 1.2e9.
+                                if (cumulative_work as f64) > 1.2e9 {
+                                    cfg4.max_blocks = 16;
+                                }
                                 let improved4 = rgreedy::subtree_refine(
                                      n,
                                      &pattern.col_ptr,
