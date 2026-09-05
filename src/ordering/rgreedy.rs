@@ -818,8 +818,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add(best / par.accept_den * par.accept_num);
+        let bound = (if thresh > cur_f[wi] { thresh } else { cur_f[wi] }).saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -2169,43 +2169,103 @@ pub(crate) fn simplicial_promotion(
 // at a time.
 // ════════════════════════════════════════════════════════════════════════════
 
-// Reuse the thread's local-id map, clearing every entry touched by the previous
-// block even if its boundary was rejected early. Accepted blocks retain the
-// incumbent S order followed by first-seen original-graph boundary vertices.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) struct StampEntry {
+    pub(crate) gen: u32,
+    pub(crate) local_id: u32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct GenerationalStampArray {
+    pub(crate) stamps: Vec<StampEntry>,
+    pub(crate) gen: u32,
+}
+
+impl GenerationalStampArray {
+    pub(crate) fn new(n: usize) -> Self {
+        Self {
+            stamps: vec![StampEntry::default(); n],
+            gen: 1,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn next_generation(&mut self) {
+        self.gen = self.gen.wrapping_add(1);
+        if self.gen == 0 {
+            self.stamps.fill(StampEntry::default());
+            self.gen = 1;
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, u: usize) -> Option<u32> {
+        let entry = self.stamps.get(u)?;
+        if entry.gen == self.gen {
+            Some(entry.local_id)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_current(&self, u: usize) -> bool {
+        self.stamps.get(u).map_or(false, |entry| entry.gen == self.gen)
+    }
+
+    #[inline]
+    pub(crate) fn set(&mut self, u: usize, local_id: u32) {
+        self.stamps[u] = StampEntry {
+            gen: self.gen,
+            local_id,
+        };
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.stamps.len()
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.stamps.is_empty()
+    }
+}
+
+// Advance the generation counter in the thread's stamp array. Any entries
+// written by previous blocks (even if rejected early) become immediately
+// stale without requiring an explicit clearing pass.
+// Accepted blocks retain the incumbent S order followed by first-seen
+// original-graph boundary vertices.
 fn collect_subtree_vertices(
     col_ptr: &[usize],
     row_idx: &[usize],
     block: &[usize],
     max_sub: usize,
-    local: &mut [u32],
-    touched: &mut Vec<usize>,
+    stamps: &mut GenerationalStampArray,
     verts: &mut Vec<usize>,
 ) -> bool {
     verts.clear();
-    for &v in touched.iter() {
-        local[v] = u32::MAX;
-    }
-    touched.clear();
+    stamps.next_generation();
     let limit = max_sub.min(MAX_N);
     if block.len() > limit {
         return false;
     }
     // S first: local id i is position a + i, so its seed is the identity.
     for &v in block {
-        local[v] = verts.len() as u32;
-        touched.push(v);
+        stamps.set(v, verts.len() as u32);
         verts.push(v);
     }
     for &v in block {
         for &u in &row_idx[col_ptr[v]..col_ptr[v + 1]] {
-            if u < local.len() && local[u] == u32::MAX {
+            if u < stamps.len() && !stamps.is_current(u) {
                 // The next distinct boundary vertex makes this block ineligible.
-                // Leave the partial map in touched for the next call to clear.
+                // Stale entries from this rejected block will naturally be ignored
+                // when next_generation() is called on the next block.
                 if verts.len() == limit {
                     return false;
                 }
-                local[u] = verts.len() as u32;
-                touched.push(u);
+                stamps.set(u, verts.len() as u32);
                 verts.push(u);
             }
         }
@@ -2339,8 +2399,7 @@ pub(crate) fn subtree_refine(
         let handles: Vec<_> = (0..nthreads)
             .map(|t| {
                 sc.spawn(move || {
-                    let mut local: Vec<u32> = vec![u32::MAX; n];
-                    let mut touched: Vec<usize> = Vec::new();
+                    let mut stamps = GenerationalStampArray::new(n);
                     let mut verts: Vec<usize> = Vec::new();
                     let mut got: Vec<(usize, Vec<usize>)> = Vec::new();
                     let mut bi = t;
@@ -2354,8 +2413,7 @@ pub(crate) fn subtree_refine(
                             row_idx,
                             &perm_ro[a..=b],
                             cfg.max_sub,
-                            &mut local,
-                            &mut touched,
+                            &mut stamps,
                             &mut verts,
                         ) {
                             continue;
@@ -2370,8 +2428,10 @@ pub(crate) fn subtree_refine(
                                 if u >= n {
                                     continue;
                                 }
-                                let lu = local[u];
-                                if lu == u32::MAX || lu as usize == li {
+                                let Some(lu) = stamps.get(u) else {
+                                    continue;
+                                };
+                                if lu as usize == li {
                                     continue;
                                 }
                                 let lu = lu as usize;
@@ -2492,8 +2552,7 @@ mod subtree_preparation_tests {
         let n = MAX_N + 8;
         let edges: Vec<_> = (1..n).map(|v| (0, v)).collect();
         let pat = Pattern::from_edges(n, &edges);
-        let mut local = vec![u32::MAX; n];
-        let mut touched = Vec::new();
+        let mut stamps = GenerationalStampArray::new(n);
         let mut verts = Vec::new();
         for max_sub in [4, usize::MAX] {
             let limit = max_sub.min(MAX_N);
@@ -2502,14 +2561,15 @@ mod subtree_preparation_tests {
                 &pat.row_idx,
                 &[0, 1],
                 max_sub,
-                &mut local,
-                &mut touched,
+                &mut stamps,
                 &mut verts,
             ));
             assert_eq!(verts.len(), limit);
-            assert_eq!(touched, verts);
-            assert_eq!(local.iter().filter(|&&v| v != u32::MAX).count(), limit);
-            assert_eq!(local[limit], u32::MAX);
+            assert_eq!(
+                stamps.stamps.iter().filter(|s| s.gen == stamps.gen).count(),
+                limit
+            );
+            assert_eq!(stamps.get(limit), None);
 
             // Both leaves connect to the old block's hub. Its stale local id
             // must be erased before it becomes boundary id 2 for this block.
@@ -2518,16 +2578,14 @@ mod subtree_preparation_tests {
                 &pat.row_idx,
                 &[n - 2, n - 1],
                 3,
-                &mut local,
-                &mut touched,
+                &mut stamps,
                 &mut verts,
             ));
             assert_eq!(verts, [n - 2, n - 1, 0]);
-            assert_eq!(touched, verts);
-            assert_eq!(local[0], 2);
-            assert_eq!(local[n - 2], 0);
-            assert_eq!(local[n - 1], 1);
-            assert!(local[1..n - 2].iter().all(|&v| v == u32::MAX));
+            assert_eq!(stamps.get(0), Some(2));
+            assert_eq!(stamps.get(n - 2), Some(0));
+            assert_eq!(stamps.get(n - 1), Some(1));
+            assert!(stamps.stamps[1..n - 2].iter().all(|s| s.gen != stamps.gen));
         }
     }
 
@@ -2539,8 +2597,7 @@ mod subtree_preparation_tests {
             .filter(|&(u, v)| (u + v) % 3 != 0)
             .collect();
         let pat = Pattern::from_edges(n, &edges);
-        let mut local = vec![u32::MAX; n];
-        let mut touched = Vec::new();
+        let mut stamps = GenerationalStampArray::new(n);
         let mut verts = Vec::new();
         for mask in 1usize..(1 << n) {
             let block: Vec<_> = (0..n).rev().filter(|&v| mask & (1 << v) != 0).collect();
@@ -2560,8 +2617,7 @@ mod subtree_preparation_tests {
                     &pat.row_idx,
                     &block,
                     limit,
-                    &mut local,
-                    &mut touched,
+                    &mut stamps,
                     &mut verts,
                 );
                 assert_eq!(accepted, expected.len() <= limit);
@@ -2570,16 +2626,28 @@ mod subtree_preparation_tests {
                     assert_eq!(verts, expected);
                     for v in 0..n {
                         assert_eq!(
-                            local[v],
+                            stamps.get(v),
                             expected
                                 .iter()
                                 .position(|&u| u == v)
-                                .map_or(u32::MAX, |i| i as u32)
+                                .map(|i| i as u32)
                         );
                     }
                 }
             }
         }
+    }
+
+    #[test]
+    fn generational_stamp_array_wraparound_resets_cleanly() {
+        let mut stamps = GenerationalStampArray::new(10);
+        stamps.gen = u32::MAX;
+        stamps.set(3, 42);
+        assert_eq!(stamps.get(3), Some(42));
+        stamps.next_generation();
+        assert_eq!(stamps.gen, 1);
+        assert_eq!(stamps.get(3), None);
+        assert!(stamps.stamps.iter().all(|s| s.gen == 0));
     }
 }
 
