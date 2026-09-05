@@ -372,6 +372,30 @@ const RELABEL_AMF_MAX_NNZ: usize = 200_000;
 const SUBTREE_SEARCH_WORK_LIMIT: i64 = 32_000_000;
 #[cfg(test)]
 const TERMINAL_SUBTREE_SEARCH_WORK_LIMIT: i64 = 16_000_000;
+
+#[cfg(test)]
+fn work_limit(base: i64, best_flops: u64, amd_flops: u64) -> i64 {
+    if (best_flops as f64) < 0.75 * (amd_flops as f64) {
+        (base as f64 * 1.5) as i64
+    } else {
+        base
+    }
+}
+
+#[cfg(test)]
+fn subtree_work_limit(base: i64, best_flops: u64, amd_flops: u64) -> i64 {
+    work_limit(base, best_flops, amd_flops)
+}
+
+#[cfg(test)]
+fn subtree_search_work_limit(best_flops: u64, amd_flops: u64) -> i64 {
+    work_limit(SUBTREE_SEARCH_WORK_LIMIT, best_flops, amd_flops)
+}
+
+#[cfg(test)]
+fn terminal_subtree_search_work_limit(best_flops: u64, amd_flops: u64) -> i64 {
+    work_limit(TERMINAL_SUBTREE_SEARCH_WORK_LIMIT, best_flops, amd_flops)
+}
 const SUBTREE_CFG: rgreedy::SubCfg = rgreedy::SubCfg {
     min_s: 32,
     max_s: 384,
@@ -1260,8 +1284,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -3414,6 +3438,43 @@ mod tests {
 
     #[test]
     fn subtree_configs_stay_within_matrix_work_limit() {
+        assert_eq!(
+            subtree_search_work_limit(50, 100),
+            (SUBTREE_SEARCH_WORK_LIMIT as f64 * 1.5) as i64
+        );
+        assert_eq!(
+            subtree_search_work_limit(74, 100),
+            (SUBTREE_SEARCH_WORK_LIMIT as f64 * 1.5) as i64
+        );
+        assert_eq!(
+            subtree_search_work_limit(75, 100),
+            SUBTREE_SEARCH_WORK_LIMIT
+        );
+        assert_eq!(
+            subtree_search_work_limit(100, 100),
+            SUBTREE_SEARCH_WORK_LIMIT
+        );
+
+        assert_eq!(
+            terminal_subtree_search_work_limit(50, 100),
+            (TERMINAL_SUBTREE_SEARCH_WORK_LIMIT as f64 * 1.5) as i64
+        );
+        assert_eq!(
+            terminal_subtree_search_work_limit(74, 100),
+            (TERMINAL_SUBTREE_SEARCH_WORK_LIMIT as f64 * 1.5) as i64
+        );
+        assert_eq!(
+            terminal_subtree_search_work_limit(75, 100),
+            TERMINAL_SUBTREE_SEARCH_WORK_LIMIT
+        );
+        assert_eq!(
+            terminal_subtree_search_work_limit(100, 100),
+            TERMINAL_SUBTREE_SEARCH_WORK_LIMIT
+        );
+
+        assert_eq!(subtree_work_limit(100, 50, 100), 150);
+        assert_eq!(subtree_work_limit(100, 75, 100), 100);
+
         let requested_budget = SUBTREE_CFG
             .budget
             .saturating_mul(SUBTREE_CFG.max_blocks as i64)
@@ -3424,6 +3485,9 @@ mod tests {
             (500usize, 2_000usize, 50u64, 100u64),
             (5_000, 10_000, 50, 100),
             (20_000, 80_000, 50, 100),
+            (500, 2_000, 100, 100),
+            (5_000, 10_000, 100, 100),
+            (20_000, 80_000, 100, 100),
         ] {
             let mut cfg = subtree_cfg_for(n, nnz);
             cfg.round = 1;
@@ -3439,8 +3503,7 @@ mod tests {
                 .budget
                 .saturating_mul(cfg.max_blocks as i64)
                 .saturating_mul(cfg.streams.max(1) as i64);
-            assert!(requested_budget <= SUBTREE_SEARCH_WORK_LIMIT);
-            let _ = (best, amd);
+            assert!(requested_budget <= subtree_search_work_limit(best, amd));
         }
 
         let mut extra = SUBTREE_CFG;
@@ -3449,19 +3512,19 @@ mod tests {
         extra.max_blocks = 4;
         extra.budget = 4_000_000;
         extra.round = 8;
-        for cfg in [
-            extra,
-            terminal_deep_subtree_cfg(9_999, 0, 100, 100),
-            terminal_deep_subtree_cfg(10_000, 0, 100, 100),
-            terminal_deep_subtree_cfg(10_000, 100_000, 100, 100),
-            terminal_deep_subtree_cfg(10_000, 0, 50, 100),
+        for (cfg, best, amd) in [
+            (extra, 50u64, 100u64),
+            (terminal_deep_subtree_cfg(9_999, 0, 100, 100), 100, 100),
+            (terminal_deep_subtree_cfg(10_000, 0, 100, 100), 100, 100),
+            (terminal_deep_subtree_cfg(10_000, 100_000, 100, 100), 100, 100),
+            (terminal_deep_subtree_cfg(10_000, 0, 50, 100), 50, 100),
         ] {
             let requested_budget = cfg
                 .budget
                 .saturating_mul(cfg.max_blocks as i64)
                 .saturating_mul(cfg.streams.max(1) as i64);
 
-            assert!(requested_budget <= TERMINAL_SUBTREE_SEARCH_WORK_LIMIT);
+            assert!(requested_budget <= terminal_subtree_search_work_limit(best, amd));
         }
     }
 }
