@@ -2024,10 +2024,11 @@ pub(crate) fn adjacent_five_descent(
 /// Ost, Schulz, and Strash (arXiv:2004.11315) prove that a simplicial vertex is
 /// safe to eliminate immediately. At each exact elimination state, this pass
 /// looks 2..=16 positions ahead of the planned pivot `x`. A future simplicial
-/// neighbor with smaller current degree is moved in front of `x`; the minimum
-/// `(degree, position, vertex id)` wins and every other vertex keeps its relative
-/// order. The caller still re-scores the completed candidate with the canonical
-/// symbolic scorer and accepts strict improvements only.
+/// neighbor with smaller current degree is moved in front of `x`; ties between
+/// multiple simplicial vertices are broken by degree descending to prioritize
+/// large cliques (then position and vertex id ascending). Every other vertex
+/// keeps its relative order. The caller still re-scores the completed candidate
+/// with the canonical symbolic scorer and accepts strict improvements only.
 ///
 /// Every potentially expensive operation is charged *before* it runs. If the
 /// deterministic budget cannot cover validation, graph construction, a
@@ -2129,7 +2130,7 @@ pub(crate) fn simplicial_promotion(
         let x = cur[k];
         let x_degree = game.deg[x];
         let last = (k + MAX_DISTANCE).min(n - 1);
-        let mut best: Option<(u32, usize, usize)> = None;
+        let mut best: Option<(std::cmp::Reverse<u32>, usize, usize)> = None;
 
         for (j, &v) in cur.iter().enumerate().take(last + 1).skip(k + 2) {
             // Position/id reads, degree comparison, and adjacency membership.
@@ -2149,7 +2150,7 @@ pub(crate) fn simplicial_promotion(
                 return None;
             }
             if game.deficiency(v) == 0 {
-                let key = (degree, j, v);
+                let key = (std::cmp::Reverse(degree), j, v);
                 if best.is_none_or(|old| key < old) {
                     best = Some(key);
                 }
@@ -3634,5 +3635,25 @@ mod five_window_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod simplicial_promotion_tests {
+    use super::super::Pattern;
+    use super::*;
+
+    #[test]
+    fn simplicial_promotion_prioritizes_higher_degree_cliques() {
+        let n = 6;
+        let edges = [(0, 1), (0, 2), (0, 3), (0, 4), (2, 3)];
+        let pat = Pattern::from_edges(n, &edges);
+        let seed = vec![0, 5, 1, 2, 3, 4];
+        let promoted = simplicial_promotion(n, &pat.col_ptr, &pat.row_idx, &seed, 1_000_000)
+            .expect("simplicial promotion should succeed");
+        assert_eq!(
+            promoted[0], 2,
+            "Higher degree simplicial vertex (v=2, deg=2) must be promoted over lower degree (v=1, deg=1)"
+        );
     }
 }
