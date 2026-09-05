@@ -2343,6 +2343,9 @@ pub(crate) fn subtree_refine(
                     let mut touched: Vec<usize> = Vec::new();
                     let mut verts: Vec<usize> = Vec::new();
                     let mut got: Vec<(usize, Vec<usize>)> = Vec::new();
+                    let max_sub_bound = cfg.max_sub.min(MAX_N);
+                    let max_adj_words = max_sub_bound.saturating_mul(max_sub_bound.div_ceil(64));
+                    let mut adj0: Vec<u64> = vec![0u64; max_adj_words];
                     let mut bi = t;
                     while bi < blocks_ro.len() {
                         let block_rank = bi;
@@ -2364,7 +2367,11 @@ pub(crate) fn subtree_refine(
 
                         // Induced adjacency over S u boundary, as bitsets.
                         let w = m.div_ceil(64);
-                        let mut adj0 = vec![0u64; m * w];
+                        let needed = m * w;
+                        if adj0.len() < needed {
+                            adj0.resize(needed, 0);
+                        }
+                        adj0[..needed].fill(0);
                         for (li, &v) in verts.iter().enumerate() {
                             for &u in &row_idx[col_ptr[v]..col_ptr[v + 1]] {
                                 if u >= n {
@@ -2418,7 +2425,7 @@ pub(crate) fn subtree_refine(
                             }
                             let r = search_with_nelim(
                                 m,
-                                &adj0,
+                                &adj0[..needed],
                                 ssz,
                                 &seed,
                                 seed_flops,
@@ -2580,6 +2587,66 @@ mod subtree_preparation_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn subtree_refine_preallocated_bitset_deterministic_and_valid() {
+        use feral::ordering::amd::permute_pattern;
+        use feral::ordering::elimination_tree::EliminationTree;
+        use feral::symbolic::column_counts_gnp;
+
+        let n = 80;
+        let mut edges = Vec::new();
+        for i in 0..n {
+            if i + 1 < n {
+                edges.push((i, i + 1));
+            }
+            if i + 2 < n {
+                edges.push((i, i + 2));
+            }
+            if i + 5 < n {
+                edges.push((i, i + 5));
+            }
+        }
+        let pat = Pattern::from_edges(n, &edges);
+        let scoring_pat = super::super::ScoringPattern {
+            n: pat.n,
+            col_ptr: pat.col_ptr.clone(),
+            row_idx: pat.row_idx.clone(),
+        };
+        let perm: Vec<usize> = (0..n).collect();
+        let permuted = permute_pattern(&scoring_pat, &perm);
+        let etree = EliminationTree::from_pattern(&permuted);
+        let post = etree.postorder();
+        let candidate: Vec<usize> = post.iter().map(|&j| perm[j]).collect();
+        let post_pattern = permute_pattern(&scoring_pat, &candidate);
+        let post_etree = EliminationTree::from_pattern(&post_pattern);
+        let counts: Vec<u32> = column_counts_gnp(&post_pattern, &post_etree)
+            .into_iter()
+            .map(|c| c as u32)
+            .collect();
+        let parent: Vec<i32> = post_etree
+            .parent
+            .iter()
+            .map(|p| p.map_or(-1, |j| j as i32))
+            .collect();
+        let cfg = SubCfg {
+            min_s: 4,
+            max_s: 32,
+            max_sub: 64,
+            max_blocks: 16,
+            budget: 10_000,
+            streams: 1,
+            rank_blocks: true,
+            round: 0,
+        };
+        let mut cand1 = candidate.clone();
+        let mut cand2 = candidate.clone();
+        let imp1 = subtree_refine(n, &pat.col_ptr, &pat.row_idx, &mut cand1, &counts, &parent, cfg);
+        let imp2 = subtree_refine(n, &pat.col_ptr, &pat.row_idx, &mut cand2, &counts, &parent, cfg);
+        assert_eq!(imp1, imp2);
+        assert_eq!(cand1, cand2);
+        assert!(super::super::is_bijection(&cand1, n));
     }
 }
 
