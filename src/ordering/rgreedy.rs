@@ -818,8 +818,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add(best / par.accept_den * par.accept_num);
+        let bound = (if thresh > cur_f[wi] { thresh } else { cur_f[wi] }).saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -2277,7 +2277,7 @@ pub(crate) fn subtree_refine(
     let mut covered = vec![false; n];
     let mut blocks: Vec<(usize, usize)> = Vec::new();
     for j in (0..n).rev() {
-        if covered[j] {
+        if cfg.offset == 0 && covered[j] {
             continue;
         }
         let sz = size[j] as usize;
@@ -2285,10 +2285,23 @@ pub(crate) fn subtree_refine(
             continue;
         }
         let a = j + 1 - sz;
-        for c in covered.iter_mut().take(j + 1).skip(a) {
+        let (a_blk, b_blk) = if cfg.offset > 0 {
+            let a_off = a + cfg.offset;
+            let b_off = j + cfg.offset;
+            if b_off >= n {
+                continue;
+            }
+            (a_off, b_off)
+        } else {
+            (a, j)
+        };
+        if covered[a_blk..=b_blk].iter().any(|&c| c) {
+            continue;
+        }
+        for c in covered.iter_mut().take(b_blk + 1).skip(a_blk) {
             *c = true;
         }
-        blocks.push((a, j));
+        blocks.push((a_blk, b_blk));
         if !cfg.rank_blocks && blocks.len() >= cfg.max_blocks {
             break;
         }
@@ -2480,6 +2493,9 @@ pub(crate) struct SubCfg {
     pub(crate) rank_blocks: bool,
     /// Zero-based outer RGSUB round, used only to diversify an equal-work seed.
     pub(crate) round: usize,
+    /// Offset postorder block boundaries to capture boundary separators
+    /// that straddled earlier blocks.
+    pub(crate) offset: usize,
 }
 
 #[cfg(test)]
@@ -2580,6 +2596,33 @@ mod subtree_preparation_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn offset_block_boundaries_shifts_and_captures_boundary() {
+        let n = 64;
+        let edges: Vec<_> = (0..n - 1).map(|v| (v, v + 1)).collect();
+        let pat = Pattern::from_edges(n, &edges);
+        let mut perm: Vec<usize> = (0..n).collect();
+        let counts: Vec<u32> = vec![1; n];
+        let mut parent: Vec<i32> = (1..n as i32).collect();
+        parent.push(-1);
+
+        let mut cfg = SubCfg {
+            min_s: 16,
+            max_s: 16,
+            max_sub: 1200,
+            max_blocks: 32,
+            budget: 0,
+            streams: 1,
+            rank_blocks: false,
+            round: 0,
+            offset: 0,
+        };
+        let _ = subtree_refine(n, &pat.col_ptr, &pat.row_idx, &mut perm, &counts, &parent, cfg);
+
+        cfg.offset = cfg.min_s / 2;
+        let _ = subtree_refine(n, &pat.col_ptr, &pat.row_idx, &mut perm, &counts, &parent, cfg);
     }
 }
 

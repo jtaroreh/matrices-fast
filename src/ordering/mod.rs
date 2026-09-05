@@ -381,6 +381,7 @@ const SUBTREE_CFG: rgreedy::SubCfg = rgreedy::SubCfg {
     streams: 1,
     rank_blocks: true,
     round: 0,
+    offset: 0,
 };
 
 /// Lower bound of the bounded subtree-refinement chain.
@@ -1260,8 +1261,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -1582,6 +1583,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                         cfg3.min_s = 16;
                         cfg3.max_s = 512;
                         cfg3.budget = 8_000_000;
+                        cfg3.offset = cfg3.min_s / 2;
                         let improved3 = rgreedy::subtree_refine(
                             n,
                             &pattern.col_ptr,
@@ -1628,6 +1630,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                 cfg4.max_blocks = 32;
                                 cfg4.min_s = 16;
                                 cfg4.max_s = 768;
+                                cfg4.offset = cfg4.min_s / 2;
                                 cfg4.budget = if (1_000..6_000).contains(&n) {
                                     64_000_000
                                 } else {
