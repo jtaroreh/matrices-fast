@@ -1594,18 +1594,22 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                         if improved3 > 0 && is_bijection(&candidate3, n) {
                             let f3 = flops_of(&scoring_pat, &candidate3);
                             if f3 < best_flops {
+                                let prev3_flops = best_flops;
                                 best_flops = f3;
                                 best_perm = candidate3;
 
-                                // Round 4: one more pass over the round-3
-                                // incumbent. Same block count as round 3 (32)
-                                // but a wider window (max_s 768), so later
-                                // rounds of the chain keep exploring larger
-                                // subtrees of each newly refined tree. Spend
-                                // 64M per block only in the measured-safe
-                                // lower-medium band; retain the hidden-proven
-                                // 32M budget everywhere else.
-                                let permuted4 = permute_pattern(&scoring_pat, &best_perm);
+                                let rel_improvement =
+                                    (prev3_flops - f3) as f64 / prev3_flops as f64;
+                                if rel_improvement >= 0.0005 {
+                                    // Round 4: one more pass over the round-3
+                                    // incumbent. Same block count as round 3 (32)
+                                    // but a wider window (max_s 768), so later
+                                    // rounds of the chain keep exploring larger
+                                    // subtrees of each newly refined tree. Spend
+                                    // 64M per block only in the measured-safe
+                                    // lower-medium band; retain the hidden-proven
+                                    // 32M budget everywhere else.
+                                    let permuted4 = permute_pattern(&scoring_pat, &best_perm);
                                 let etree4 = EliminationTree::from_pattern(&permuted4);
                                 let post4 = etree4.postorder();
                                 let mut candidate4: Vec<usize> =
@@ -1698,7 +1702,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                         }
                                     }
                                 }
-
+                                }
                             }
                         }
                     }
