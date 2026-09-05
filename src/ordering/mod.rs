@@ -939,6 +939,28 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         });
     }
 
+    // Alternative Scotch strategy biasing partitioning toward minimum vertex cut width.
+    // In SCOTCH strategy string language: "m{asc=b{width=3,org=f{bal=0.01,move=80}},low=g;f}"
+    // (multilevel bisection with band FM refinement around the separator and strict balance).
+    // In pure-Rust feral-scotch, this strategy is realized via ScotchOptions parameters:
+    // tighter balance tolerance (max_imbalance: 0.01) and deeper FM refinement (fm_move_cap: 300,
+    // fm_pass_cap: 48, n_sep_trials: 8) to minimize separator weight / cut width.
+    if n < SCOTCH_TUNED_MAX_N && nnz < SCOTCH_TUNED_MAX_NNZ {
+        const _SCOTCH_MIN_CUT_WIDTH_STRAT: &str =
+            "m{asc=b{width=3,org=f{bal=0.01,move=80}},low=g;f}";
+        let scotch_min_cut = feral_scotch::ScotchOptions {
+            max_imbalance: 0.01,
+            fm_move_cap: 300,
+            fm_pass_cap: 48,
+            n_sep_trials: 8,
+            ..Default::default()
+        };
+        consider(&|| {
+            let _ = _SCOTCH_MIN_CUT_WIDTH_STRAT;
+            feral_scotch::scotch_order_full(&core, &scotch_min_cut).map(|(p, _, _)| p)
+        });
+    }
+
     // KaHIP — distinct partitioner, small-matrix only. Milliseconds even at 5×;
     // widened in n to target the large count of lt_1k / lower-1k_10k ties (incl.
     // dense tiny like qap) while nnz stays tight. `seed = 1` (default) deterministic.
