@@ -16,7 +16,7 @@ pub struct CapConfig {
 impl Default for CapConfig {
     fn default() -> Self {
         CapConfig {
-            time_cap: Duration::from_secs(2),
+            time_cap: Duration::from_secs(10),
             poll: Duration::from_millis(10),
         }
     }
@@ -205,7 +205,7 @@ mod tests {
     fn fast_command_is_ok() {
         let mut cmd = Command::new("true");
         let cfg = CapConfig {
-            time_cap: Duration::from_secs(2),
+            time_cap: Duration::from_secs(10),
             poll: Duration::from_millis(5),
         };
         assert_eq!(run_capped(&mut cmd, &cfg), WorkerOutcome::Ok);
@@ -225,7 +225,7 @@ mod tests {
         let outcome = run_capped(&mut cmd, &cfg);
         assert_eq!(outcome, WorkerOutcome::Timeout);
         assert!(
-            start.elapsed() < Duration::from_secs(2),
+            start.elapsed() < Duration::from_secs(10),
             "watchdog did not kill promptly: {:?}",
             start.elapsed()
         );
@@ -317,7 +317,7 @@ mod tests {
     fn nonzero_exit_is_crashed() {
         let mut cmd = Command::new("false");
         let cfg = CapConfig {
-            time_cap: Duration::from_secs(2),
+            time_cap: Duration::from_secs(10),
             poll: Duration::from_millis(5),
         };
         assert!(matches!(

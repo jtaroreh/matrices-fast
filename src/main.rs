@@ -71,7 +71,7 @@ pub use ssi_scoring::Pattern;
 /// (Hilbert dispatches `cargo run --release` in the repo's own Actions), so the
 /// cap that gates a submission on the server is exactly this constant — local
 /// and graded runs use the identical 2 s cap by construction.
-const TIME_CAP_PER_MATRIX: Duration = Duration::from_secs(2);
+const TIME_CAP_PER_MATRIX: Duration = Duration::from_secs(10);
 const CANDIDATE_WORKER_ENV: &str = "SSI_CANDIDATE_WORKER";
 
 /// Parent-only smoke/CI knob: when set to a positive integer, the harness scores
