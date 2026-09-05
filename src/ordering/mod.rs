@@ -1260,11 +1260,11 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
-        if let Some(cand) = rgreedy::adjacent_pair_descent(
+        if let Some((cand, delta)) = rgreedy::adjacent_pair_descent_with_delta(
             n,
             &pattern.col_ptr,
             &pattern.row_idx,
@@ -1272,11 +1272,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             PAIR_DESCENT_SWEEPS,
             pair_descent_ops_budget,
         ) {
-            let f = flops_of(&scoring_pat, &cand);
-            if f < best_flops {
-                best_flops = f;
-                best_perm = cand;
-            }
+            best_flops = best_flops.saturating_sub(delta);
+            best_perm = cand;
         }
     }
 
@@ -1418,7 +1415,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
 
     // On the medium exact-search gate, refine the new incumbent once more.
     if pair_descent_gate && medium_exact_gate {
-        if let Some(cand) = rgreedy::adjacent_pair_descent(
+        if let Some((cand, delta)) = rgreedy::adjacent_pair_descent_with_delta(
             n,
             &pattern.col_ptr,
             &pattern.row_idx,
@@ -1426,11 +1423,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
             PAIR_DESCENT_SWEEPS,
             pair_descent_ops_budget,
         ) {
-            let f = flops_of(&scoring_pat, &cand);
-            if f < best_flops {
-                best_flops = f;
-                best_perm = cand;
-            }
+            best_flops = best_flops.saturating_sub(delta);
+            best_perm = cand;
         }
     }
 

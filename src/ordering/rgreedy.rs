@@ -818,8 +818,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add(best / par.accept_den * par.accept_num);
+        let bound = (if thresh > cur_f[wi] { thresh } else { cur_f[wi] }).saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -1025,14 +1025,75 @@ fn search_par_specs(
 /// residual graph after both pivots. The lower-current-degree pivot first is
 /// therefore a strict local improvement. Alternating parity covers every
 /// adjacent boundary while preserving deterministic, disjoint choices.
-pub(crate) fn adjacent_pair_descent(
+const PAIR_ORDERS: [[usize; 2]; 2] = [
+    [0, 1],
+    [1, 0],
+];
+
+/// Exact costs for both orders of two live vertices.
+///
+/// If adjacent, the second pivot's updated degree `|N(a) \u{222a} N(b)| - 2` is symmetric,
+/// so the two orders differ only by `(deg[a] + 1)\u{b2} - (deg[b] + 1)\u{b2}`.
+/// If non-adjacent, neither elimination updates the other's degree, so both
+/// orders have identical cost.
+fn pair_costs(game: &Game<'_>, verts: [usize; 2]) -> [u64; 2] {
+    let [a, b] = verts;
+    let adjacent = game.adj[a * game.w + (b >> 6)] & (1u64 << (b & 63)) != 0;
+    let da = game.deg[a] as u64 + 1;
+    let db = game.deg[b] as u64 + 1;
+    if !adjacent {
+        let cost = da * da + db * db;
+        [cost, cost]
+    } else {
+        let wa = &game.adj[a * game.w..(a + 1) * game.w];
+        let wb = &game.adj[b * game.w..(b + 1) * game.w];
+        let union_count: u64 = wa
+            .iter()
+            .zip(wb)
+            .map(|(&x, &y)| (x | y).count_ones() as u64)
+            .sum();
+        let c2 = union_count - 1;
+        let c2_sq = c2 * c2;
+        [da * da + c2_sq, db * db + c2_sq]
+    }
+}
+
+/// Exact local flop difference between eliminating [a, b] vs [b, a].
+///
+/// For consecutive adjacent pivots, eliminating either vertex updates the other
+/// to the identical residual degree `|N(a) \u{222a} N(b)| - 2`. The second pivot's squared
+/// column count cancels out completely, so the local flop difference is evaluated
+/// directly from the initial live vertex degrees without full graph re-scoring:
+/// `(deg[a] + 1)\u{b2} - (deg[b] + 1)\u{b2}`.
+/// Non-adjacent pivots do not update each other's degree, giving a difference of 0.
+#[inline]
+pub(crate) fn pair_flop_diff(game: &Game<'_>, a: usize, b: usize) -> (bool, u64) {
+    let adjacent = game.adj[a * game.w + (b >> 6)] & (1u64 << (b & 63)) != 0;
+    if !adjacent {
+        return (false, 0);
+    }
+    let da = game.deg[a] as u64 + 1;
+    let db = game.deg[b] as u64 + 1;
+    let cost_ab = da * da;
+    let cost_ba = db * db;
+    if cost_ba < cost_ab {
+        (true, cost_ab - cost_ba)
+    } else {
+        (false, 0)
+    }
+}
+
+/// Exact adjacent-transposition descent around a completed ordering, returning
+/// both the improved permutation and the exact total flop reduction evaluated
+/// locally from vertex degree updates without full graph re-scoring.
+pub(crate) fn adjacent_pair_descent_with_delta(
     n: usize,
     col_ptr: &[usize],
     row_idx: &[usize],
     seed: &[usize],
     sweeps: usize,
     budget: i64,
-) -> Option<Vec<usize>> {
+) -> Option<(Vec<usize>, u64)> {
     if n < 2 || seed.len() != n || sweeps == 0 || budget <= 0 {
         return None;
     }
@@ -1049,6 +1110,7 @@ pub(crate) fn adjacent_pair_descent(
     let mut cur = seed.to_vec();
     let mut next = Vec::with_capacity(n);
     let mut changed_any = false;
+    let mut total_delta = 0u64;
 
     for sweep in 0..sweeps {
         game.reset();
@@ -1072,9 +1134,13 @@ pub(crate) fn adjacent_pair_descent(
         while k + 1 < n {
             let a = cur[k];
             let b = cur[k + 1];
-            let adjacent = game.adj[a * game.w + (b >> 6)] & (1u64 << (b & 63)) != 0;
-            let swap = adjacent && game.deg[b] < game.deg[a];
-            let (first, second) = if swap { (b, a) } else { (a, b) };
+            let (swap, flop_diff) = pair_flop_diff(&game, a, b);
+            let (first, second) = if swap {
+                total_delta += flop_diff;
+                (b, a)
+            } else {
+                (a, b)
+            };
             changed |= swap;
             next.push(first);
             next.push(second);
@@ -1103,7 +1169,25 @@ pub(crate) fn adjacent_pair_descent(
         }
     }
 
-    changed_any.then_some(cur)
+    changed_any.then_some((cur, total_delta))
+}
+
+/// Exact adjacent-transposition descent around a completed ordering.
+///
+/// For consecutive adjacent pivots, either orientation leaves the same
+/// residual graph after both pivots. The lower-current-degree pivot first is
+/// therefore a strict local improvement. Alternating parity covers every
+/// adjacent boundary while preserving deterministic, disjoint choices.
+pub(crate) fn adjacent_pair_descent(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    seed: &[usize],
+    sweeps: usize,
+    budget: i64,
+) -> Option<Vec<usize>> {
+    adjacent_pair_descent_with_delta(n, col_ptr, row_idx, seed, sweeps, budget)
+        .map(|(cand, _)| cand)
 }
 
 const TRIPLE_ORDERS: [[usize; 3]; 6] = [
@@ -2580,6 +2664,119 @@ mod subtree_preparation_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pair_tests {
+    use super::super::{flops_of, is_bijection, Pattern, ScoringPattern};
+    use super::*;
+
+    fn canonical(pat: &Pattern, perm: &[usize]) -> u64 {
+        flops_of(
+            &ScoringPattern {
+                n: pat.n,
+                col_ptr: pat.col_ptr.clone(),
+                row_idx: pat.row_idx.clone(),
+            },
+            perm,
+        )
+    }
+
+    #[test]
+    fn pair_costs_and_flop_diff_match_replay_and_residual() {
+        for n in [3, 5, 8, 17, 65] {
+            let edges = [(0, 1), (0, 2), (1, 2), (1, 3.min(n - 1))];
+            let pat = Pattern::from_edges(n, &edges);
+            let adj0 = Game::build_adj(n, &pat.col_ptr, &pat.row_idx).unwrap();
+            let mut game = Game::new(n, &adj0).unwrap();
+            let limit = 4.min(n);
+            for a in 0..limit {
+                for b in 0..limit {
+                    if a == b {
+                        continue;
+                    }
+                    game.reset();
+                    let is_adj = game.adj[a * game.w + (b >> 6)] & (1u64 << (b & 63)) != 0;
+                    let costs = pair_costs(&game, [a, b]);
+                    let (swap, delta) = pair_flop_diff(&game, a, b);
+
+                    // Replay [a, b]
+                    game.reset();
+                    let ca1 = game.eliminate(a);
+                    let cb1 = game.eliminate(b);
+                    let replay_ab = ca1 * ca1 + cb1 * cb1;
+                    let res_ab = game.adj.clone();
+
+                    // Replay [b, a]
+                    game.reset();
+                    let cb2 = game.eliminate(b);
+                    let ca2 = game.eliminate(a);
+                    let replay_ba = cb2 * cb2 + ca2 * ca2;
+                    let res_ba = game.adj.clone();
+
+                    assert_eq!(costs[0], replay_ab);
+                    assert_eq!(costs[1], replay_ba);
+                    assert_eq!(res_ab, res_ba, "residual graph must be identical for both orders");
+
+                    if is_adj && replay_ba < replay_ab {
+                        assert!(swap);
+                        assert_eq!(delta, replay_ab - replay_ba);
+                    } else {
+                        assert!(!swap);
+                        assert_eq!(delta, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn adjacent_pair_descent_delta_matches_full_graph_rescoring() {
+        let mut rng = 0xA4F1_5B92_3C87_E0D1u64;
+        for n in [6, 15, 33, 67] {
+            let mut edges = Vec::new();
+            for u in 0..n {
+                for v in u + 1..n {
+                    if xs64(&mut rng) % 7 == 0 {
+                        edges.push((u, v));
+                    }
+                }
+            }
+            let pat = Pattern::from_edges(n, &edges);
+            let mut seed: Vec<_> = (0..n).collect();
+            for i in 1..n {
+                seed.swap(i, xs64(&mut rng) as usize % (i + 1));
+            }
+
+            let before_flops = canonical(&pat, &seed);
+            if let Some((cand, delta)) =
+                adjacent_pair_descent_with_delta(n, &pat.col_ptr, &pat.row_idx, &seed, 4, 1_000_000)
+            {
+                assert!(is_bijection(&cand, n));
+                let after_flops = canonical(&pat, &cand);
+                assert!(after_flops < before_flops);
+                assert_eq!(
+                    before_flops - after_flops,
+                    delta,
+                    "local flop reduction from vertex degree updates must match full graph re-scoring"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn adjacent_pair_descent_validation_and_budget() {
+        let n = 6;
+        let edges = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)];
+        let pat = Pattern::from_edges(n, &edges);
+        let seed = vec![0, 1, 2, 3, 4, 5];
+
+        assert!(adjacent_pair_descent(1, &pat.col_ptr, &pat.row_idx, &seed, 1, 1000).is_none());
+        assert!(adjacent_pair_descent(n, &pat.col_ptr, &pat.row_idx, &seed, 0, 1000).is_none());
+        assert!(adjacent_pair_descent(n, &pat.col_ptr, &pat.row_idx, &seed, 1, 0).is_none());
+        assert!(adjacent_pair_descent(n, &pat.col_ptr, &pat.row_idx, &[0, 1, 2, 3, 4, 4], 1, 1000).is_none());
+        assert!(adjacent_pair_descent(n, &pat.col_ptr, &pat.row_idx, &[0, 1, 2, 3, 4, 6], 1, 1000).is_none());
     }
 }
 
