@@ -6,3 +6,8 @@
 # The log starts empty: your first run appends the first row. For the score the
 # shipped src/ordering/ reaches on the dev corpus, see
 # src/ordering/memory/index.md.
+1788601867	OK	1.000000	1.000000	
+1788601995	FAIL	NaN	NaN	failed to load hidden corpus
+1788601996	OK	1.000000	1.000000	
+1788602207	OK	0.874205	0.958271	time_cap test: normal
+1788602218	FAIL	NaN	NaN	slay06m: order() exceeded the 10.0s per-matrix cap and was killed (took ≥ 10.0s). Your ordering must return within 10s on every matrix. This matrix is n=357, nnz=1080, nnz/n≈3 — if it is dense, the cost is in order() itself; gate expensive paths by BOTH n and nnz. | time_cap test: slow

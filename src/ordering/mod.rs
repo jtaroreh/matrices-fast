@@ -1132,7 +1132,11 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     // a ratio, never raise it — and TIME is the only thing at stake. See
     // `RELABEL_AMF_MAX_NNZ` for how that is bounded.
     if nnz <= RELABEL_AMF_MAX_NNZ {
-        let amf_alphas = [5.0f64, 2.0, -1.0, 1.0, 16.0];
+        let amf_alphas: &[f64] = if nnz <= 100_000 {
+            &[1.0, 2.0, 2.5, 8.0]
+        } else {
+            &[5.0, 2.0, -1.0, 1.0, 16.0]
+        };
         let num_passes: usize = if nnz <= 80_000 { 2 } else { 1 };
         for pass in 0..num_passes {
             let seed_offset = pass as u64 * 1000;
@@ -1195,7 +1199,7 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                 continue;
             };
             if nnz <= RELABEL_AMF_MAX_NNZ {
-                let da = [5.0f64, 2.0, -1.0, 1.0, 16.0][r % 5];
+                let da = [1.0f64, 2.0, 2.5, 8.0][r % 4];
                 let opts = feral_amf::AmfOptions {
                     dense_alpha: da,
                     ..Default::default()
