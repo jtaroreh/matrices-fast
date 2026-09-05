@@ -698,6 +698,15 @@ pub(crate) fn search_with(
     search_with_nelim(n, adj0, n, seed, seed_flops, budget, rng_seed, par)
 }
 
+#[inline]
+pub(crate) fn state_hash(order: &[usize]) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for &v in order {
+        h = (h ^ v as u64).wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 /// [`search_with`] on a game where only the first `nelim` vertices may be
 /// eliminated — the elimination-tree-subtree subproblem. See
 /// [`Game::new_partial`].
@@ -792,6 +801,14 @@ pub(crate) fn search_with_nelim(
     } else {
         best_ord.clone()
     };
+    let mut plateau_hashes = [0u64; 64];
+    let (mut plateau_head, mut plateau_len) = if start.is_empty() {
+        (0usize, 0usize)
+    } else {
+        plateau_hashes[0] = state_hash(&start);
+        (1usize, 1usize)
+    };
+
     let nwalk = par.walks.max(1);
     let nelim = g.nelim;
     let _ = nelim;
@@ -818,8 +835,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add(best / par.accept_den * par.accept_num);
+        let bound = (if thresh > cur_f[wi] { thresh } else { cur_f[wi] }).saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -827,33 +844,46 @@ pub(crate) fn search_with_nelim(
         if g.ops == before {
             break; // the next reset cannot fit; do not retry without progress
         }
-        match r {
-            Some(f) => {
+        let mut accepted = false;
+        if let Some(f) = r {
+            let h = state_hash(&out);
+            let visited = plateau_hashes[..plateau_len].contains(&h);
+            if f < best || !visited {
                 if f < best {
                     best = f;
                     best_ord = out.clone();
                 }
-                // `f <= bound` by the pruning rule, so every returned run is
-                // accepted: this is the sideways / threshold drift.
                 cur_f[wi] = f;
                 std::mem::swap(&mut cur[wi], &mut out);
                 stall = 0;
+                plateau_hashes[plateau_head] = h;
+                plateau_head = (plateau_head + 1) % 64;
+                if plateau_len < 64 {
+                    plateau_len += 1;
+                }
+                accepted = true;
             }
-            None => {
-                stall += 1;
-                #[allow(clippy::needless_late_init)]
-                if par.stall_limit != 0 && stall >= par.stall_limit {
-                    stall = 0;
-                    let pol = pols[it % pols.len()];
-                    it += 1;
-                    if let Some(f) = g.run(&[], pol, &mut rng, u64::MAX, hard_cap, &mut kick) {
-                        if f < best {
-                            best = f;
-                            best_ord = kick.clone();
-                        }
-                        cur_f[wi] = f;
-                        cur[wi].clear();
-                        cur[wi].extend_from_slice(&kick);
+        }
+        if !accepted {
+            stall += 1;
+            #[allow(clippy::needless_late_init)]
+            if par.stall_limit != 0 && stall >= par.stall_limit {
+                stall = 0;
+                let pol = pols[it % pols.len()];
+                it += 1;
+                if let Some(f) = g.run(&[], pol, &mut rng, u64::MAX, hard_cap, &mut kick) {
+                    if f < best {
+                        best = f;
+                        best_ord = kick.clone();
+                    }
+                    cur_f[wi] = f;
+                    cur[wi].clear();
+                    cur[wi].extend_from_slice(&kick);
+                    let kh = state_hash(&kick);
+                    plateau_hashes[plateau_head] = kh;
+                    plateau_head = (plateau_head + 1) % 64;
+                    if plateau_len < 64 {
+                        plateau_len += 1;
                     }
                 }
             }
@@ -1263,6 +1293,81 @@ mod atomic_budget_tests {
         let seed: Vec<_> = (0..n).collect();
         for budget in [0, 1, 32] {
             assert!(search(n, &pat.col_ptr, &pat.row_idx, &seed, u64::MAX, budget, 7).is_none());
+        }
+    }
+
+    #[test]
+    fn state_hash_properties() {
+        let a = [0, 1, 2, 3];
+        let b = [0, 1, 2, 3];
+        let c = [3, 2, 1, 0];
+        assert_eq!(state_hash(&a), state_hash(&b));
+        assert_ne!(state_hash(&a), state_hash(&c));
+    }
+
+    #[test]
+    fn cyclic_buffer_plateau_rejection_logic() {
+        let mut plateau_hashes = [0u64; 64];
+        let mut plateau_head = 0usize;
+        let mut plateau_len = 0usize;
+
+        // Fill 64 distinct states
+        for i in 0..64 {
+            let ord = vec![i, i + 1, i + 2];
+            let h = state_hash(&ord);
+            plateau_hashes[plateau_head] = h;
+            plateau_head = (plateau_head + 1) % 64;
+            if plateau_len < 64 {
+                plateau_len += 1;
+            }
+        }
+        assert_eq!(plateau_len, 64);
+        assert_eq!(plateau_head, 0);
+
+        // All 64 states should be detected as visited
+        for i in 0..64 {
+            let ord = vec![i, i + 1, i + 2];
+            let h = state_hash(&ord);
+            assert!(plateau_hashes[..plateau_len].contains(&h));
+        }
+
+        // Push state 64, overwriting the oldest entry (state 0)
+        let ord64 = vec![100, 101, 102];
+        let h64 = state_hash(&ord64);
+        plateau_hashes[plateau_head] = h64;
+        plateau_head = (plateau_head + 1) % 64;
+        if plateau_len < 64 {
+            plateau_len += 1;
+        }
+        assert_eq!(plateau_len, 64);
+        assert_eq!(plateau_head, 1);
+
+        // State 0 was evicted
+        let ord0 = vec![0, 1, 2];
+        let h0 = state_hash(&ord0);
+        assert!(!plateau_hashes[..plateau_len].contains(&h0));
+        // State 64 is present
+        assert!(plateau_hashes[..plateau_len].contains(&h64));
+    }
+
+    #[test]
+    fn search_with_cyclic_buffer_finds_valid_ordering() {
+        let n = 8;
+        let pat = fixture(n);
+        let seed: Vec<_> = (0..n).collect();
+        let scoring = ScoringPattern {
+            n,
+            col_ptr: pat.col_ptr.clone(),
+            row_idx: pat.row_idx.clone(),
+        };
+        let seed_flops = flops_of(&scoring, &seed);
+        let res = search(n, &pat.col_ptr, &pat.row_idx, &seed, seed_flops, 200_000, 42);
+        if let Some((ord, flops)) = res {
+            assert!(flops <= seed_flops);
+            let mut sorted = ord.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..n).collect::<Vec<_>>());
+            assert_eq!(flops, flops_of(&scoring, &ord));
         }
     }
 }
