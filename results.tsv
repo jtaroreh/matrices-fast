@@ -6,3 +6,5 @@
 # The log starts empty: your first run appends the first row. For the score the
 # shipped src/ordering/ reaches on the dev corpus, see
 # src/ordering/memory/index.md.
+1788602259	OK	0.933001	0.974999	quick baseline check
+1788602396	OK	0.914271	0.970864	testing exhaustive 3-pivot adjacent descent on n <= 500

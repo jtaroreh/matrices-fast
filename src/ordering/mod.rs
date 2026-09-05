@@ -1943,6 +1943,20 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
         }
     }
 
+    if n >= 3 && n <= 500 {
+        if let Some(cand) = rgreedy::exhaustive_triple_descent(
+            n,
+            &pattern.col_ptr,
+            &pattern.row_idx,
+            &best_perm,
+        ) {
+            let f = flops_of(&scoring_pat, &cand);
+            if f < best_flops {
+                best_perm = cand;
+            }
+        }
+    }
+
     best_perm
 }
 

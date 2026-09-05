@@ -1399,6 +1399,67 @@ pub(crate) fn adjacent_triple_descent(
     changed.then_some(cur)
 }
 
+/// Exhaustive exact 3-pivot adjacent descent across all n-2 overlapping triplets,
+/// repeated until convergence (a full pass yields zero improvements).
+pub(crate) fn exhaustive_triple_descent(
+    n: usize,
+    col_ptr: &[usize],
+    row_idx: &[usize],
+    seed: &[usize],
+) -> Option<Vec<usize>> {
+    if n < 3 || n > 500 || seed.len() != n || col_ptr.len() != n + 1 {
+        return None;
+    }
+    if col_ptr.first().copied() != Some(0)
+        || col_ptr.last().copied() != Some(row_idx.len())
+        || col_ptr.windows(2).any(|p| p[0] > p[1] || p[1] > row_idx.len())
+        || row_idx.iter().any(|&v| v >= n)
+    {
+        return None;
+    }
+    let mut seen = vec![false; n];
+    for &v in seed {
+        if v >= n || seen[v] {
+            return None;
+        }
+        seen[v] = true;
+    }
+
+    let adj0 = Game::build_adj(n, col_ptr, row_idx)?;
+    let mut game = Game::new(n, &adj0)?;
+    let mut cur = seed.to_vec();
+    let mut changed_any = false;
+
+    loop {
+        let mut changed_this_pass = false;
+        game.reset();
+        let mut k = 0;
+        while k + 2 < n {
+            let triple = [cur[k], cur[k + 1], cur[k + 2]];
+            let costs = triple_costs(&game, triple);
+            let mut best = 0;
+            for choice in 1..TRIPLE_ORDERS.len() {
+                if costs[choice] < costs[best] {
+                    best = choice;
+                }
+            }
+            if best != 0 {
+                let chosen = TRIPLE_ORDERS[best].map(|i| triple[i]);
+                cur[k..k + 3].copy_from_slice(&chosen);
+                changed_this_pass = true;
+                changed_any = true;
+            }
+            game.eliminate(cur[k]);
+            k += 1;
+        }
+        if !changed_this_pass {
+            break;
+        }
+    }
+
+    changed_any.then_some(cur)
+}
+
 /// Exact widths after any subset of a fixed four-pivot window is eliminated.
 /// For the pivot's connected component C in H[S + pivot], a nonsingleton C
 /// has width |union N_H(C)| - |C| + 1. Every vertex of C is in that union,
@@ -2743,6 +2804,41 @@ mod triple_tests {
         }
         assert!(improvements > 0);
         println!("TRIPLE_CANONICAL improving_cases={improvements}");
+    }
+
+    #[test]
+    fn exhaustive_triple_descent_is_canonically_monotone_deterministic_and_converged() {
+        let mut rng = 0x517C_C1B7_2722_0A95;
+        let mut tested = 0;
+        for n in [10, 25, 50, 100] {
+            let mut edges = Vec::new();
+            for v in 0..n {
+                edges.push((v, (v + 1) % n));
+                edges.push((v, (v + 3) % n));
+            }
+            let pat = Pattern::from_edges(n, &edges);
+            let mut seed: Vec<_> = (0..n).collect();
+            for i in 1..n {
+                seed.swap(i, xs64(&mut rng) as usize % (i + 1));
+            }
+            let before = canonical(&pat, &seed);
+            let first = exhaustive_triple_descent(n, &pat.col_ptr, &pat.row_idx, &seed);
+            let second = exhaustive_triple_descent(n, &pat.col_ptr, &pat.row_idx, &seed);
+            assert_eq!(first, second, "determinism for n={n}");
+            if let Some(got) = first {
+                assert!(is_bijection(&got, n));
+                let after = canonical(&pat, &got);
+                assert!(after < before, "strictly monotone decrease for n={n}");
+                // Verify convergence: running exhaustive descent again on the result must yield None!
+                let converged = exhaustive_triple_descent(n, &pat.col_ptr, &pat.row_idx, &got);
+                assert!(
+                    converged.is_none(),
+                    "must be fully converged (local minimum across all n-2 triplets) for n={n}"
+                );
+                tested += 1;
+            }
+        }
+        assert!(tested > 0);
     }
 }
 
