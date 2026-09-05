@@ -413,10 +413,36 @@ impl<'a> Game<'a> {
     }
 }
 
-/// A pivot policy: pick uniformly among the live vertices whose degree is
-/// within `slack` of the minimum; when `fill_tb` is set, break that set by
-/// smallest deficiency first (a min-fill lookahead over a min-degree
-/// candidate list).
+/// Select a candidate vertex with probability proportional to `(degree + 1)^-2`.
+#[inline]
+pub(crate) fn select_weighted_candidate(cand: &[u32], deg: &[u32], rng: &mut u64) -> usize {
+    if cand.len() <= 1 {
+        return cand.first().copied().unwrap_or(0) as usize;
+    }
+    let mut total_w = 0.0f64;
+    for &v in cand {
+        let d = deg[v as usize] as f64 + 1.0;
+        total_w += 1.0 / (d * d);
+    }
+    let threshold = ((xs64(rng) >> 11) as f64 / (1u64 << 53) as f64) * total_w;
+    let mut acc = 0.0f64;
+    let mut sel = cand[cand.len() - 1];
+    for &v in cand {
+        let d = deg[v as usize] as f64 + 1.0;
+        acc += 1.0 / (d * d);
+        if acc > threshold {
+            sel = v;
+            break;
+        }
+    }
+    sel as usize
+}
+
+/// A pivot policy: pick live vertices whose degree is within `slack` of the
+/// minimum with probability proportional to `(degree + 1)^-2`; when `fill_tb` is
+/// set, break that set by smallest deficiency first (a min-fill lookahead over
+/// a min-degree candidate list), breaking deficiency ties with probability
+/// proportional to `(degree + 1)^-2`.
 #[derive(Clone, Copy)]
 struct Policy {
     slack: u32,
@@ -504,85 +530,57 @@ impl Game<'_> {
                 dmin = d0 as usize;
             }
             let cut = (dmin + pol.slack as usize).min(self.n - 1);
-            let pick;
-            if pol.slack == 0 && !pol.fill_tb {
-                // Uniform over the argmin bucket, via reservoir sampling (no
-                // allocation, no index bias, and no dependence on the list's
-                // internal order beyond the sampling itself).
-                let mut cnt = 0u32;
-                let mut sel = 0i32;
-                if self.use_buckets {
-                    sel = self.bhead[dmin];
-                    let mut x = self.bhead[dmin];
+            self.cand.clear();
+            if self.use_buckets {
+                for d in dmin..=cut {
+                    let mut x = self.bhead[d];
                     while x >= 0 {
-                        cnt += 1;
-                        if below(rng, cnt) == 0 {
-                            sel = x;
-                        }
+                        self.cand.push(x as u32);
                         x = self.bnext[x as usize];
                     }
-                    self.ops += cnt as i64 * 2 + 4;
-                } else {
-                    for i in 0..self.nlive {
-                        let v = self.livelist[i];
-                        if self.deg[v as usize] as usize == dmin {
-                            cnt += 1;
-                            if below(rng, cnt) == 0 {
-                                sel = v as i32;
-                            }
+                }
+                self.ops += self.cand.len() as i64 * 2 + 4;
+            } else {
+                for i in 0..self.nlive {
+                    let v = self.livelist[i];
+                    if (self.deg[v as usize] as usize) <= cut {
+                        self.cand.push(v);
+                    }
+                }
+            }
+            let pick;
+            if pol.fill_tb && self.cand.len() > 1 {
+                // Min-deficiency over the candidate list, with ties broken
+                // with probability proportional to (degree + 1)^-2.
+                let cands = std::mem::take(&mut self.cand);
+                let mut bestdef = u32::MAX;
+                let mut weight_sum = 0.0f64;
+                let mut sel = cands[0];
+                for &v in &cands {
+                    let cost = (self.deg[v as usize] as usize + 1) * (2 * self.w + 4);
+                    if !self.fits_ops(cost, hard_cap) {
+                        return None;
+                    }
+                    let d = self.deficiency(v as usize);
+                    let w = {
+                        let d1 = self.deg[v as usize] as f64 + 1.0;
+                        1.0 / (d1 * d1)
+                    };
+                    if d < bestdef {
+                        bestdef = d;
+                        weight_sum = w;
+                        sel = v;
+                    } else if d == bestdef {
+                        weight_sum += w;
+                        if ((xs64(rng) >> 11) as f64 / (1u64 << 53) as f64) * weight_sum < w {
+                            sel = v;
                         }
                     }
                 }
+                self.cand = cands;
                 pick = sel as usize;
             } else {
-                self.cand.clear();
-                if self.use_buckets {
-                    for d in dmin..=cut {
-                        let mut x = self.bhead[d];
-                        while x >= 0 {
-                            self.cand.push(x as u32);
-                            x = self.bnext[x as usize];
-                        }
-                    }
-                    self.ops += self.cand.len() as i64 * 2 + 4;
-                } else {
-                    for i in 0..self.nlive {
-                        let v = self.livelist[i];
-                        if (self.deg[v as usize] as usize) <= cut {
-                            self.cand.push(v);
-                        }
-                    }
-                }
-                if pol.fill_tb && self.cand.len() > 1 {
-                    // Min-deficiency over the (small) degree candidate list,
-                    // uniform among deficiency ties.
-                    let cands = std::mem::take(&mut self.cand);
-                    let mut bestdef = u32::MAX;
-                    let mut cnt = 0u32;
-                    let mut sel = cands[0];
-                    for &v in &cands {
-                        let cost = (self.deg[v as usize] as usize + 1) * (2 * self.w + 4);
-                        if !self.fits_ops(cost, hard_cap) {
-                            return None;
-                        }
-                        let d = self.deficiency(v as usize);
-                        if d < bestdef {
-                            bestdef = d;
-                            cnt = 1;
-                            sel = v;
-                        } else if d == bestdef {
-                            cnt += 1;
-                            if below(rng, cnt) == 0 {
-                                sel = v;
-                            }
-                        }
-                    }
-                    self.cand = cands;
-                    pick = sel as usize;
-                } else {
-                    let k = below(rng, self.cand.len() as u32) as usize;
-                    pick = self.cand[k] as usize;
-                }
+                pick = select_weighted_candidate(&self.cand, &self.deg, rng);
             }
             if !self.fits_ops(self.elimination_ops(pick), hard_cap) {
                 return None;
@@ -818,8 +816,8 @@ pub(crate) fn search_with_nelim(
         let pol = pols[it % pols.len()];
         let wi = it % nwalk;
         it += 1;
-        let thresh = best + best / par.accept_den * par.accept_num;
-        let bound = if thresh > cur_f[wi] { thresh } else { cur_f[wi] } + 1;
+        let thresh = best.saturating_add(best / par.accept_den * par.accept_num);
+        let bound = (if thresh > cur_f[wi] { thresh } else { cur_f[wi] }).saturating_add(1);
         let taken = std::mem::take(&mut cur[wi]);
         let r = g.run(&taken[..p.min(taken.len())], pol, &mut rng, bound, hard_cap, &mut out);
         cur[wi] = taken;
@@ -1264,6 +1262,105 @@ mod atomic_budget_tests {
         for budget in [0, 1, 32] {
             assert!(search(n, &pat.col_ptr, &pat.row_idx, &seed, u64::MAX, budget, 7).is_none());
         }
+    }
+}
+
+#[cfg(test)]
+mod candidate_selection_tests {
+    use super::*;
+
+    #[test]
+    fn candidate_selection_proportional_to_degree_inv_squared() {
+        let cand = [0u32, 1u32];
+        let deg = [1u32, 3u32];
+        let mut rng = 1234567890123456789u64;
+        let mut count0 = 0;
+        let trials = 50_000;
+        for _ in 0..trials {
+            let pick = select_weighted_candidate(&cand, &deg, &mut rng);
+            if pick == 0 {
+                count0 += 1;
+            }
+        }
+        let p0 = count0 as f64 / trials as f64;
+        assert!((p0 - 0.8).abs() < 0.01, "expected ~0.80, got {p0}");
+    }
+
+    #[test]
+    fn candidate_selection_three_degrees() {
+        let cand = [0u32, 1u32, 2u32];
+        let deg = [0u32, 1u32, 2u32];
+        let mut rng = 9876543210987654321u64;
+        let mut counts = [0; 3];
+        let trials = 100_000;
+        for _ in 0..trials {
+            let pick = select_weighted_candidate(&cand, &deg, &mut rng);
+            counts[pick] += 1;
+        }
+        let p0 = counts[0] as f64 / trials as f64;
+        let p1 = counts[1] as f64 / trials as f64;
+        let p2 = counts[2] as f64 / trials as f64;
+        assert!((p0 - 0.7347).abs() < 0.01, "p0: expected ~0.7347, got {p0}");
+        assert!((p1 - 0.1837).abs() < 0.01, "p1: expected ~0.1837, got {p1}");
+        assert!((p2 - 0.0816).abs() < 0.01, "p2: expected ~0.0816, got {p2}");
+    }
+
+    #[test]
+    fn game_run_respects_degree_weighting() {
+        let n = 4;
+        let col_ptr = vec![0, 1, 3, 6, 8];
+        let row_idx = vec![
+            2,       // 0's neighbor
+            2, 3,    // 1's neighbors
+            0, 1, 3, // 2's neighbors
+            1, 2,    // 3's neighbors
+        ];
+        let adj = Game::build_adj(n, &col_ptr, &row_idx).unwrap();
+        let mut count0 = 0;
+        let trials = 20_000;
+        let pol = Policy { slack: 1, fill_tb: false };
+        let mut out = Vec::new();
+        let mut rng = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..trials {
+            let mut game = Game::new(n, &adj).unwrap();
+            out.clear();
+            game.run(&[], pol, &mut rng, u64::MAX, 1_000_000, &mut out).unwrap();
+            if out[0] == 0 {
+                count0 += 1;
+            }
+        }
+        let p0 = count0 as f64 / trials as f64;
+        let expected = (1.0 / 4.0) / (1.0 / 4.0 + 1.0 / 9.0 + 1.0 / 9.0);
+        assert!((p0 - expected).abs() < 0.02, "expected ~{expected:.4}, got {p0:.4}");
+    }
+
+    #[test]
+    fn game_run_fill_tb_respects_degree_weighting() {
+        let n = 4;
+        let col_ptr = vec![0, 3, 5, 7, 8];
+        let row_idx = vec![
+            1, 2, 3, // 0's neighbors
+            0, 2,    // 1's neighbors
+            0, 1,    // 2's neighbors
+            0,       // 3's neighbors
+        ];
+        let adj = Game::build_adj(n, &col_ptr, &row_idx).unwrap();
+        let mut count3 = 0;
+        let trials = 20_000;
+        let pol = Policy { slack: 1, fill_tb: true };
+        let mut out = Vec::new();
+        let mut rng = 0xD1B5_4A32_D192_ED03u64;
+        for _ in 0..trials {
+            let mut game = Game::new(n, &adj).unwrap();
+            out.clear();
+            game.run(&[], pol, &mut rng, u64::MAX, 1_000_000, &mut out).unwrap();
+            if out[0] == 3 {
+                count3 += 1;
+            }
+        }
+        let p3 = count3 as f64 / trials as f64;
+        let expected = (1.0 / 4.0) / (1.0 / 4.0 + 1.0 / 9.0 + 1.0 / 9.0);
+        assert!((p3 - expected).abs() < 0.02, "expected ~{expected:.4}, got {p3:.4}");
     }
 }
 
