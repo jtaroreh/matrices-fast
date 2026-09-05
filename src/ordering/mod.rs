@@ -1260,8 +1260,8 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
     } else {
         PAIR_DESCENT_OPS_BUDGET
     };
-    let mut well_below;
-    let mut medium_exact_gate;
+    let well_below;
+    let medium_exact_gate;
 
     if pair_descent_gate {
         if let Some(cand) = rgreedy::adjacent_pair_descent(
@@ -1679,6 +1679,26 @@ pub fn order(pattern: &Pattern) -> Vec<usize> {
                                                 cfg5.max_blocks = 32;
                                                 cfg5.budget = 16_000_000;
                                             }
+                                            let improved5 = rgreedy::subtree_refine(
+                                                n,
+                                                &pattern.col_ptr,
+                                                &pattern.row_idx,
+                                                &mut candidate5,
+                                                &counts5,
+                                                &parent5,
+                                                cfg5,
+                                            );
+                                            if improved5 > 0 && is_bijection(&candidate5, n) {
+                                                let f = flops_of(&scoring_pat, &candidate5);
+                                                if f < best_flops {
+                                                    best_flops = f;
+                                                    best_perm = candidate5;
+                                                }
+                                            }
+                                        } else if n >= 10_000 {
+                                            cfg5.max_blocks = 16;
+                                            cfg5.budget = 4_000_000;
+                                            cfg5.max_s = 256;
                                             let improved5 = rgreedy::subtree_refine(
                                                 n,
                                                 &pattern.col_ptr,
